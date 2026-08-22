@@ -1,0 +1,144 @@
+using BeamSharp.Epmd;
+using BeamSharp.Node;
+using BeamSharp.Terms;
+
+// A C# node that an Elixir peer can talk to as if it were just another BEAM node.
+//
+//   dotnet run --project samples/BeamSharp.Server -- [nodename] [cookie]
+
+var positional = args.Where(a => !a.StartsWith("--")).ToArray();
+var nodeName = positional.Length > 0 ? positional[0] : $"csharp@{NodeName.LocalShortHost}";
+var cookie = positional.Length > 1 ? positional[1] : null;
+
+var node = new ErlangNode(nodeName, new ErlangNodeOptions
+{
+    Cookie = cookie,
+    // Hidden by default. --visible joins the mesh, which also means peers expect us to speak
+    // the `global` name-registry protocol that this library does not implement.
+    Visibility = args.Contains("--visible") ? NodeVisibility.Visible : NodeVisibility.Hidden,
+    Log = line => Console.WriteLine($"[dist] {line}")
+});
+
+node.NodeUp += peer => Console.WriteLine($"--> {peer} connected");
+node.NodeDown += (peer, error) => Console.WriteLine($"<-- {peer} disconnected ({error?.Message ?? "clean"})");
+
+// A GenServer. From Elixir: GenServer.call({:calculator, :"csharp@host"}, {:add, 1, 2})
+node.RegisterGenServer("calculator", new Calculator(node));
+
+// A plain mailbox, the equivalent of a spawned process that just receives.
+var printer = node.CreateMailbox("printer");
+_ = Task.Run(async () =>
+{
+    await foreach (var message in printer.Messages.ReadAllAsync())
+        Console.WriteLine($"printer got {message.Term}" +
+                          (message.Sender is null ? "" : $" from {message.Sender}"));
+});
+
+// Exposed to :rpc.call/4 and :erpc.call/4.
+node.RpcHandler = new RpcRegistry()
+    .Add("Elixir.CSharp", "add", 2, a => Erl.Int(a[0].AsLong() + a[1].AsLong()))
+    .Add("Elixir.CSharp", "info", 0, _ => Erl.Map(
+        ("runtime", Erl.String(".NET " + Environment.Version)),
+        ("os", Erl.String(Environment.OSVersion.ToString())),
+        ("pid", Erl.Int(Environment.ProcessId))))
+    .Add("csharp", "reverse", 1, a => Erl.String(new string(a[0].AsText().Reverse().ToArray())));
+
+await node.StartAsync();
+
+Console.WriteLine($$"""
+
+    Node   : {{node.Name}}
+    Port   : {{node.Port}}
+    Cookie : {{node.Cookie}}
+
+    From  iex --sname client --cookie {{node.Cookie}}
+
+      Node.ping(:"{{node.Name}}")
+      GenServer.call({:calculator, :"{{node.Name}}"}, {:add, 40, 2})
+      GenServer.call({:calculator, :"{{node.Name}}"}, :slow)
+      GenServer.cast({:calculator, :"{{node.Name}}"}, {:log, "hi"})
+      send({:printer, :"{{node.Name}}"}, {:hello, self()})
+      :rpc.call(:"{{node.Name}}", CSharp, :add, [2, 3])
+      :erpc.call(:"{{node.Name}}", :csharp, :reverse, ["stressed"])
+
+    Ctrl-C to stop.
+
+    """);
+
+var stop = new TaskCompletionSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    stop.TrySetResult();
+};
+await stop.Task;
+await node.DisposeAsync();
+
+/// <summary>Answers the calls an Elixir GenServer client would make.</summary>
+internal sealed class Calculator(ErlangNode node) : ErlangGenServer
+{
+    public override async ValueTask<ErlTerm?> HandleCallAsync(ErlTerm request, GenCallFrom from, CancellationToken ct)
+    {
+        switch (request)
+        {
+            case ErlTuple { Arity: 3 } t when t[0].IsAtom("add"):
+                return Erl.Int(t[1].AsLong() + t[2].AsLong());
+
+            case ErlTuple { Arity: 2 } t when t[0].IsAtom("echo"):
+                return t[1];
+
+            case ErlAtom { Name: "who" }:
+                return Erl.Tuple(Erl.Atom("csharp"), Erl.String(node.Name.Full));
+
+            case ErlAtom { Name: "slow" }:
+                // Reply later, the equivalent of returning {:noreply, state} and calling
+                // GenServer.reply/2 once the work is done.
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(500, ct);
+                    await node.ReplyAsync(from, Erl.Atom("worth_the_wait"), ct: ct);
+                }, ct);
+                return null;
+
+            case ErlTuple { Arity: 2 } t when t[0].IsAtom("spawn"):
+            {
+                // Creates another mailbox so the caller can monitor or link to it.
+                var name = t[1].AsText();
+                var mailbox = node.CreateMailbox(name);
+                _ = Task.Run(async () =>
+                {
+                    await foreach (var m in mailbox.Messages.ReadAllAsync(ct))
+                        Console.WriteLine($"{name} got {m.Term}");
+                }, ct);
+                return Erl.Tuple(Erl.Ok, mailbox.Pid);
+            }
+
+            case ErlTuple { Arity: 3 } t when t[0].IsAtom("kill"):
+            {
+                // Closes it, which sends the exits and downs a dying process would send.
+                var victim = node.Whereis(t[1].AsText());
+                if (victim is null) return Erl.Tuple(Erl.Error, Erl.Atom("noproc"));
+                await node.CloseMailboxAsync(victim, t[2]);
+                return Erl.Ok;
+            }
+
+            case ErlAtom { Name: "crash" }:
+                throw new InvalidOperationException("deliberate crash");
+
+            default:
+                return Erl.Tuple(Erl.Error, Erl.Tuple(Erl.Atom("unknown_request"), request));
+        }
+    }
+
+    public override ValueTask HandleCastAsync(ErlTerm request, CancellationToken ct)
+    {
+        Console.WriteLine($"calculator cast: {request}");
+        return ValueTask.CompletedTask;
+    }
+
+    public override ValueTask HandleInfoAsync(ErlMessage message, CancellationToken ct)
+    {
+        Console.WriteLine($"calculator info: {message.Term}");
+        return ValueTask.CompletedTask;
+    }
+}

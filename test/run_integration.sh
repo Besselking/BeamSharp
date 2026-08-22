@@ -23,16 +23,16 @@ trap cleanup EXIT
 
 dotnet build --nologo -v q
 
-dotnet run --no-build --project samples/Erpc.Sample -- "$CS_NODE" "$COOKIE" >/tmp/erpc-csnode.log 2>&1 &
+dotnet run --no-build --project samples/BeamSharp.Server -- "$CS_NODE" "$COOKIE" >/tmp/beamsharp-csnode.log 2>&1 &
 CS_PID=$!
 
-elixir --sname exserver --cookie "$COOKIE" test/elixir_server.exs >/tmp/erpc-exserver.log 2>&1 &
+elixir --sname exserver --cookie "$COOKIE" test/elixir_server.exs >/tmp/beamsharp-exserver.log 2>&1 &
 EX_PID=$!
 
 # Wait for both to announce themselves.
 for _ in $(seq 1 40); do
-  grep -q "listening on port" /tmp/erpc-csnode.log 2>/dev/null &&
-    grep -q "^ready:" /tmp/erpc-exserver.log 2>/dev/null && break
+  grep -q "listening on port" /tmp/beamsharp-csnode.log 2>/dev/null &&
+    grep -q "^ready:" /tmp/beamsharp-exserver.log 2>/dev/null && break
   sleep 0.5
 done
 
@@ -43,6 +43,6 @@ elixir --sname tester --cookie "$COOKIE" test/elixir_client.exs || status=1
 
 echo
 echo "=== outbound: C# -> Elixir ==="
-dotnet run --no-build --project samples/Erpc.Client -- "$EX_NODE" "$COOKIE" || status=1
+dotnet run --no-build --project samples/BeamSharp.Client -- "$EX_NODE" "$COOKIE" || status=1
 
 exit $status

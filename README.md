@@ -1,4 +1,4 @@
-# erpc — an Erlang distribution node in C#
+# BeamSharp — an Erlang distribution node for .NET
 
 A .NET implementation of the Erlang distribution protocol. It registers with EPMD, performs the
 OTP 23+ handshake, and speaks the same signals a BEAM node does — so from Elixir it looks like an
@@ -19,10 +19,16 @@ protocol negotiation. It is the standard distribution protocol, so standard clie
 
 Verified against **Erlang/OTP 29** and **Elixir 1.20** on **.NET 10**.
 
+The closest prior art is [Erlang.NET](https://github.com/takayuki/Erlang.NET), a manual port of Java's
+jinterface. BeamSharp is a fresh implementation against modern OTP instead: `async`/`await` and
+channels rather than blocking threads, the OTP 26+ mandatory flag set, the alias-based `gen_server`
+reply path introduced in OTP 24, and the spawn-request rpc path that `:rpc.call/4` has used since
+OTP 23.
+
 ## Quick start
 
 ```bash
-dotnet run --project samples/Erpc.Sample -- "csharp@$(hostname -s)" testcookie
+dotnet run --project samples/BeamSharp.Server -- "csharp@$(hostname -s)" testcookie
 ```
 
 Then, in another terminal:
@@ -39,8 +45,8 @@ GenServer.call({:calculator, :"csharp@myhost"}, {:add, 40, 2})
 ## Using the library
 
 ```csharp
-using Erlang.Distribution.Node;
-using Erlang.Distribution.Terms;
+using BeamSharp.Node;
+using BeamSharp.Terms;
 
 await using var node = new ErlangNode($"csharp@{NodeName.LocalShortHost}", "testcookie");
 
@@ -147,21 +153,21 @@ as `{'EXIT', From, Reason}` messages rather than tearing the mailbox down.
 ## Layout
 
 ```
-src/Erlang.Distribution/
-  Terms/      external term format: model, encoder, decoder
-  Epmd/       port mapper client
-  Protocol/   flags, opcodes, handshake, framed connection
-  Node/       node, mailboxes, gen_server and rpc dispatch
-  Net/        host name resolution
+src/BeamSharp/
+  Terms/       external term format: model, encoder, decoder
+  Epmd/        port mapper client
+  Protocol/    flags, opcodes, handshake, framed connection
+  Node/        node, mailboxes, gen_server and rpc dispatch
+  Networking/  host name resolution
 samples/
-  Erpc.Sample  a C# node for Elixir to call into
-  Erpc.Client  a C# node that calls into Elixir
+  BeamSharp.Server   a .NET node for Elixir to call into
+  BeamSharp.Client   a .NET node that calls into Elixir
 test/
-  Erlang.Distribution.Tests   unit tests over the codec and protocol
-  gen_fixtures.escript        regenerates fixtures.txt from a real Erlang runtime
-  elixir_client.exs           26 checks driving the C# node from Elixir
-  elixir_server.exs           a plain Elixir GenServer for the C# node to call
-  run_integration.sh          runs both directions end to end
+  BeamSharp.Tests         unit tests over the codec and protocol
+  gen_fixtures.escript    regenerates fixtures.txt from a real Erlang runtime
+  elixir_client.exs       26 checks driving the .NET node from Elixir
+  elixir_server.exs       a plain Elixir GenServer for the .NET node to call
+  run_integration.sh      runs both directions end to end
 ```
 
 ## Testing

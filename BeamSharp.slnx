@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/BeamSharp.Client/BeamSharp.Client.csproj" />
+    <Project Path="samples/BeamSharp.Server/BeamSharp.Server.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/BeamSharp/BeamSharp.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/BeamSharp.Tests/BeamSharp.Tests.csproj" />
+  </Folder>
+</Solution>
