@@ -199,7 +199,9 @@ public sealed class EpmdClient : IAsyncDisposable
     }
 }
 
+/// <summary>Thrown when EPMD refuses a registration or answers with something unexpected.</summary>
 public sealed class EpmdException : Exception
 {
+    /// <summary>Creates the exception with an explanatory message.</summary>
     public EpmdException(string message) : base(message) { }
 }

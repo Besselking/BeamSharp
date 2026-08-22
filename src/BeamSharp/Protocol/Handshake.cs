@@ -254,7 +254,9 @@ public static class Handshake
     }
 }
 
+/// <summary>Thrown when the distribution handshake fails, most often a cookie mismatch.</summary>
 public sealed class HandshakeException : Exception
 {
+    /// <summary>Creates the exception with an explanatory message.</summary>
     public HandshakeException(string message) : base(message) { }
 }

@@ -35,6 +35,7 @@ public sealed class ErlangNode : IAsyncDisposable
     private long _refCounter;
     private int _started;
 
+    /// <summary>Creates a node called <paramref name="nodeName"/>, in the form <c>alive@host</c>.</summary>
     public ErlangNode(string nodeName, ErlangNodeOptions? options = null)
     {
         Name = NodeName.Parse(nodeName);
@@ -45,11 +46,13 @@ public sealed class ErlangNode : IAsyncDisposable
         _epmd = new EpmdClient(_options.EpmdHost, _options.EpmdPort);
     }
 
+    /// <summary>Creates a node with an explicit cookie and otherwise default options.</summary>
     public ErlangNode(string nodeName, string cookie) : this(nodeName, new ErlangNodeOptions { Cookie = cookie }) { }
 
     /// <summary>This node's name, e.g. <c>csharp@myhost</c>.</summary>
     public NodeName Name { get; }
 
+    /// <summary>The magic cookie this node authenticates with.</summary>
     public string Cookie { get; }
 
     /// <summary>Creation number handed out by EPMD; it makes pids from different node incarnations distinct.</summary>

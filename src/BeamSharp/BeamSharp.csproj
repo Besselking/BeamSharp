@@ -7,8 +7,41 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>BeamSharp</AssemblyName>
     <RootNamespace>BeamSharp</RootNamespace>
-    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!--
+      Ship XML docs for IntelliSense, but do not require a comment on every public member.
+      Types and the meaningful API carry summaries; demanding one on ErlPid.Node or on each
+      GetHashCode override buys restated names rather than information.
+    -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
   </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>BeamSharp</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Marijn Besseling</Authors>
+    <Description>
+      An Erlang distribution protocol implementation for .NET. Registers with EPMD, performs the
+      OTP 23+ handshake and speaks the same signals a BEAM node does, so an Erlang or Elixir peer
+      can send to it, call it as a GenServer, monitor it, link to it and :rpc.call into it without
+      knowing it is not talking to the BEAM.
+    </Description>
+    <PackageTags>erlang;elixir;beam;otp;distribution;epmd;rpc;genserver;interop;actor</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/Besselking/BeamSharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Besselking/BeamSharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="BeamSharp.Tests" />

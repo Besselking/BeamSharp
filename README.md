@@ -1,5 +1,8 @@
 # BeamSharp — an Erlang distribution node for .NET
 
+[![CI](https://github.com/Besselking/BeamSharp/actions/workflows/ci.yml/badge.svg)](https://github.com/Besselking/BeamSharp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A .NET implementation of the Erlang distribution protocol. It registers with EPMD, performs the
 OTP 23+ handshake, and speaks the same signals a BEAM node does — so from Elixir it looks like an
 ordinary node:

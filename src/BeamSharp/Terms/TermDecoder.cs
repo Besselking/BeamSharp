@@ -278,7 +278,9 @@ public ref struct TermDecoder
     private long ReadInt64() => BinaryPrimitives.ReadInt64BigEndian(Take(8));
 }
 
+/// <summary>Thrown when a term cannot be read, because it is truncated or uses an unsupported tag.</summary>
 public sealed class ErlDecodeException : Exception
 {
+    /// <summary>Creates the exception with an explanatory message.</summary>
     public ErlDecodeException(string message) : base(message) { }
 }
