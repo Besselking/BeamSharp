@@ -17,7 +17,9 @@ Process.monitor({:calculator, :"csharp@myhost"})
 None of that needs anything special on the Elixir side: no shim library, no custom transport, no
 protocol negotiation. It is the standard distribution protocol, so standard clients just work.
 
-Verified against **Erlang/OTP 29** and **Elixir 1.20** on **.NET 10**.
+Verified by hand against **Erlang/OTP 29** and **Elixir 1.20** on **.NET 10**. CI runs the same
+interop suite against OTP 26, 27, 28 and 29 — 26 is the floor, because that is where `V4_NC` and
+`UNLINK_ID` became mandatory flags.
 
 The closest prior art is [Erlang.NET](https://github.com/takayuki/Erlang.NET), a manual port of Java's
 jinterface. BeamSharp is a fresh implementation against modern OTP instead: `async`/`await` and
@@ -128,6 +130,29 @@ maps require, since any term can be a key.
 - **`:rpc.call/4` and `:erpc.call/4`** — both route through a distribution spawn request in OTP 23
   and later, so one handler serves both, and exceptions surface on the caller's side the way a
   raising Erlang function would.
+
+## Security
+
+Erlang distribution authenticates with a shared secret — the cookie — over an MD5 challenge, and
+then sends every message in the clear. There is no per-message authentication and no encryption.
+Any peer that can reach the distribution port and knows the cookie can send to any registered name
+on this node, monitor it, link to it, and invoke whatever you exposed through `RpcHandler`. That is
+true of a real BEAM node too; it is a property of the protocol, not of this implementation.
+
+So treat the distribution port the way you would treat an unauthenticated admin socket:
+
+- Keep it off untrusted networks. `BindAddress` defaults to `0.0.0.0`; set it to a private
+  interface, or keep the node behind a firewall or inside a private network segment.
+- Use a long, random cookie, and do not commit it. The `testcookie` in the samples is for local
+  experimentation only.
+- For cross-host traffic, tunnel it (WireGuard, an SSH tunnel, a service mesh). This library has no
+  TLS transport, so OTP's `inet_tls_dist` is not an option on this side of the connection.
+- Expose narrowly through `RpcHandler`. It runs whatever you register, so register only what you
+  are willing to have any cluster peer call.
+
+The Erlang Ecosystem Foundation's [notes on the distribution protocol and
+EPMD](https://security.erlef.org/secure_coding_and_deployment_hardening/distribution.html) are worth
+reading before putting this anywhere shared.
 
 ## Limitations
 

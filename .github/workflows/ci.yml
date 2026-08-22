@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    name: unit / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet test --nologo
+
+  interop:
+    # The point of this library is that a real BEAM node cannot tell the difference,
+    # so the interop suite runs against every OTP release we claim to support.
+    name: interop / OTP ${{ matrix.otp }} + Elixir ${{ matrix.elixir }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - otp: '26'
+            elixir: '1.17'
+          - otp: '27'
+            elixir: '1.18'
+          - otp: '28'
+            elixir: '1.19'
+          - otp: '29'
+            elixir: '1.20'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp }}
+          elixir-version: ${{ matrix.elixir }}
+      - run: test/run_integration.sh
