@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/Erpc.Client/Erpc.Client.csproj" />
+    <Project Path="samples/Erpc.Sample/Erpc.Sample.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Erlang.Distribution/Erlang.Distribution.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Erlang.Distribution.Tests/Erlang.Distribution.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,757 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
+using Erlang.Distribution.Epmd;
+using Erlang.Distribution.Net;
+using Erlang.Distribution.Protocol;
+using Erlang.Distribution.Terms;
+
+namespace Erlang.Distribution.Node;
+
+/// <summary>
+/// A C# node on an Erlang cluster. It registers with EPMD, performs the distribution handshake and
+/// speaks the same signals a real node does, so an Elixir peer can <c>send/2</c>, <c>GenServer.call/3</c>,
+/// monitor, link and <c>:rpc.call</c> into it without knowing it is not talking to the BEAM.
+/// </summary>
+public sealed class ErlangNode : IAsyncDisposable
+{
+    private static readonly ErlAtom Unused = new("");
+
+    private readonly ErlangNodeOptions _options;
+    private readonly EpmdClient _epmd;
+    private readonly CancellationTokenSource _cts = new();
+
+    private readonly ConcurrentDictionary<string, DistConnection> _connections = new();
+    private readonly ConcurrentDictionary<string, Mailbox> _registered = new();
+    private readonly ConcurrentDictionary<ErlPid, Mailbox> _mailboxes = new();
+    private readonly ConcurrentDictionary<ErlRef, PendingCall> _pendingCalls = new();
+    private readonly ConcurrentDictionary<ErlRef, Mailbox> _aliases = new();
+    private readonly SemaphoreSlim _connectLock = new(1, 1);
+    private readonly List<Task> _hostedServers = [];
+
+    private TcpListener? _listener;
+    private uint _pidId;
+    private uint _pidSerial;
+    private long _refCounter;
+    private int _started;
+
+    public ErlangNode(string nodeName, ErlangNodeOptions? options = null)
+    {
+        Name = NodeName.Parse(nodeName);
+        _options = options ?? new ErlangNodeOptions();
+        Cookie = _options.Cookie ?? ReadCookieFile()
+            ?? throw new InvalidOperationException(
+                "no cookie was supplied and ~/.erlang.cookie could not be read");
+        _epmd = new EpmdClient(_options.EpmdHost, _options.EpmdPort);
+    }
+
+    public ErlangNode(string nodeName, string cookie) : this(nodeName, new ErlangNodeOptions { Cookie = cookie }) { }
+
+    /// <summary>This node's name, e.g. <c>csharp@myhost</c>.</summary>
+    public NodeName Name { get; }
+
+    public string Cookie { get; }
+
+    /// <summary>Creation number handed out by EPMD; it makes pids from different node incarnations distinct.</summary>
+    public uint Creation { get; private set; }
+
+    /// <summary>The TCP port the distribution listener ended up on.</summary>
+    public int Port { get; private set; }
+
+    /// <summary>Names of the peers currently connected.</summary>
+    public IReadOnlyCollection<string> ConnectedNodes => _connections.Keys.ToArray();
+
+    /// <summary>Handles incoming <c>:rpc.call/4</c> and <c>:erpc.call/4</c>. Null rejects them.</summary>
+    public IErlangRpcHandler? RpcHandler { get; set; }
+
+    /// <summary>Raised when a peer connects.</summary>
+    public event Action<string>? NodeUp;
+
+    /// <summary>Raised when a peer goes away.</summary>
+    public event Action<string, Exception?>? NodeDown;
+
+    // ------------------------------------------------------------------ start
+
+    /// <summary>Binds the listener, registers with EPMD and starts accepting connections.</summary>
+    public async Task StartAsync(CancellationToken ct = default)
+    {
+        if (Interlocked.Exchange(ref _started, 1) != 0)
+            throw new InvalidOperationException("node already started");
+
+        _listener = new TcpListener(IPAddress.Parse(_options.BindAddress), _options.Port);
+        _listener.Start();
+        Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+
+        var registration = await _epmd.RegisterAsync(Name.Alive, Port, _options.Visibility, ct).ConfigureAwait(false);
+        Creation = registration.Creation;
+        Log($"{Name} listening on port {Port}, creation {Creation}, cookie {Cookie[..Math.Min(3, Cookie.Length)]}...");
+
+        if (_options.ProvideNetKernel) RegisterGenServer("net_kernel", new NetKernelServer());
+
+        _ = Task.Run(() => AcceptLoopAsync(_cts.Token));
+    }
+
+    private async Task AcceptLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            TcpClient client;
+            try
+            {
+                client = await _listener!.AcceptTcpClientAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex)
+            {
+                Log($"accept failed: {ex.Message}");
+                return;
+            }
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    client.NoDelay = true;
+                    var stream = client.GetStream();
+                    var handshake = await Handshake
+                        .AcceptAsync(stream, Name.Full, Creation, _options.Flags, _ => Cookie, ct)
+                        .ConfigureAwait(false);
+                    AttachConnection(new DistConnection(client, stream, handshake, _options.TickTime));
+                }
+                catch (Exception ex)
+                {
+                    Log($"inbound handshake failed: {ex.Message}");
+                    client.Dispose();
+                }
+            }, ct);
+        }
+    }
+
+    // ------------------------------------------------------------ connections
+
+    /// <summary>Connects to a peer node, or returns the existing connection.</summary>
+    public async Task<bool> ConnectAsync(string peerNode, CancellationToken ct = default)
+    {
+        if (_connections.ContainsKey(peerNode)) return true;
+
+        await _connectLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_connections.ContainsKey(peerNode)) return true;
+
+            var peer = NodeName.Parse(peerNode);
+            var epmd = new EpmdClient(peer.Host, _options.EpmdPort);
+            var info = await epmd.LookupAsync(peer.Alive, ct).ConfigureAwait(false);
+            if (info is null)
+            {
+                Log($"EPMD on {peer.Host} does not know a node called '{peer.Alive}'");
+                return false;
+            }
+
+            var client = await HostResolver.ConnectAsync(peer.Host, info.Port, ct).ConfigureAwait(false);
+            var stream = client.GetStream();
+            var handshake = await Handshake
+                .ConnectAsync(stream, Name.Full, Creation, _options.Flags, peerNode, Cookie, ct)
+                .ConfigureAwait(false);
+            AttachConnection(new DistConnection(client, stream, handshake, _options.TickTime));
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"connecting to {peerNode} failed: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            _connectLock.Release();
+        }
+    }
+
+    private void AttachConnection(DistConnection connection)
+    {
+        connection.OnMessage = HandleControlMessageAsync;
+        connection.Closed = (c, error) =>
+        {
+            _connections.TryRemove(new KeyValuePair<string, DistConnection>(c.PeerNode, c));
+            FailPendingCallsFor(c.PeerNode);
+            Log($"disconnected from {c.PeerNode}{(error is null ? "" : $": {error.Message}")}");
+            NodeDown?.Invoke(c.PeerNode, error);
+        };
+
+        if (_connections.TryGetValue(connection.PeerNode, out var existing) && !existing.IsClosed)
+        {
+            // Simultaneous connect: keep the one already established.
+            _ = connection.DisposeAsync();
+            return;
+        }
+
+        _connections[connection.PeerNode] = connection;
+        connection.Start();
+        Log($"connected to {connection.PeerNode} (flags {connection.Flags})");
+        NodeUp?.Invoke(connection.PeerNode);
+    }
+
+    private async Task<DistConnection> RequireConnectionAsync(string node, CancellationToken ct)
+    {
+        if (_connections.TryGetValue(node, out var existing) && !existing.IsClosed) return existing;
+        if (await ConnectAsync(node, ct).ConfigureAwait(false) &&
+            _connections.TryGetValue(node, out var fresh)) return fresh;
+        throw new IOException($"no connection to {node}");
+    }
+
+    // --------------------------------------------------------------- mailboxes
+
+    /// <summary>
+    /// Creates a mailbox — the C# equivalent of spawning a process. Pass a name to register it so
+    /// remote code can address it as <c>{:name, :"node@host"}</c>.
+    /// </summary>
+    public Mailbox CreateMailbox(string? registeredName = null, int capacity = 0)
+    {
+        var mailbox = new Mailbox(this, NextPid(), registeredName, capacity);
+        _mailboxes[mailbox.Pid] = mailbox;
+
+        if (registeredName is not null && !_registered.TryAdd(registeredName, mailbox))
+        {
+            _mailboxes.TryRemove(mailbox.Pid, out _);
+            throw new InvalidOperationException($"the name '{registeredName}' is already registered on this node");
+        }
+
+        return mailbox;
+    }
+
+    /// <summary>Registers a handler that behaves like an Elixir <c>GenServer</c> under the given name.</summary>
+    public Mailbox RegisterGenServer(string name, IErlangGenServer handler, int capacity = 0)
+    {
+        var mailbox = CreateMailbox(name, capacity);
+        var host = new GenServerHost(mailbox, handler, _options.Log);
+        lock (_hostedServers) _hostedServers.Add(Task.Run(() => host.RunAsync(_cts.Token)));
+        return mailbox;
+    }
+
+    /// <summary>Looks up a locally registered mailbox.</summary>
+    public Mailbox? Whereis(string name) => _registered.GetValueOrDefault(name);
+
+    /// <summary>Closes a mailbox and notifies whoever was linked to or monitoring it.</summary>
+    public async ValueTask CloseMailboxAsync(Mailbox mailbox, ErlTerm reason)
+    {
+        if (!mailbox.MarkClosed()) return;
+
+        _mailboxes.TryRemove(mailbox.Pid, out _);
+        if (mailbox.RegisteredName is not null)
+            _registered.TryRemove(new KeyValuePair<string, Mailbox>(mailbox.RegisteredName, mailbox));
+
+        foreach (var (reference, watcher) in mailbox.IncomingMonitors)
+            await TrySignalAsync(watcher.Node, new ErlTuple(
+                new ErlInt((int)DistOp.MonitorPExit), mailbox.Pid, watcher, reference, reason)).ConfigureAwait(false);
+
+        foreach (var linked in mailbox.Links.Keys)
+            await TrySignalAsync(linked.Node, new ErlTuple(
+                new ErlInt((int)DistOp.Exit), mailbox.Pid, linked, reason)).ConfigureAwait(false);
+
+        mailbox.IncomingMonitors.Clear();
+        mailbox.Links.Clear();
+        mailbox.CompleteInbox();
+    }
+
+    // ----------------------------------------------------------------- sending
+
+    /// <summary>Sends a message to a remote pid — the equivalent of <c>send(pid, message)</c>.</summary>
+    public async Task SendAsync(ErlPid to, ErlTerm message, ErlPid? from = null, CancellationToken ct = default)
+    {
+        if (to.Node == Name.Full)
+        {
+            DeliverLocal(to, message, from);
+            return;
+        }
+
+        var connection = await RequireConnectionAsync(to.Node, ct).ConfigureAwait(false);
+        var control = connection.Flags.HasFlag(DistributionFlags.SendSender) && from is not null
+            ? new ErlTuple(new ErlInt((int)DistOp.SendSender), from, to)
+            : new ErlTuple(new ErlInt((int)DistOp.Send), Unused, to);
+        await connection.SendAsync(control, message, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Sends to a registered name on another node — <c>send({:name, :"node@host"}, message)</c>.</summary>
+    public async Task SendAsync(string name, string node, ErlTerm message, ErlPid? from = null,
+        CancellationToken ct = default)
+    {
+        if (node == Name.Full)
+        {
+            if (_registered.TryGetValue(name, out var local)) local.TryDeliver(message, from);
+            return;
+        }
+
+        var connection = await RequireConnectionAsync(node, ct).ConfigureAwait(false);
+        var control = new ErlTuple(
+            new ErlInt((int)DistOp.RegSend), from ?? NextPid(), Unused, new ErlAtom(name));
+        await connection.SendAsync(control, message, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Sends to a process alias, which is how a <c>gen_server</c> reply gets home in OTP 24+.</summary>
+    public async Task SendToAliasAsync(ErlRef alias, ErlTerm message, ErlPid? from = null,
+        CancellationToken ct = default)
+    {
+        if (alias.Node == Name.Full)
+        {
+            if (_aliases.TryGetValue(alias, out var local)) local.TryDeliver(message, from);
+            return;
+        }
+
+        var connection = await RequireConnectionAsync(alias.Node, ct).ConfigureAwait(false);
+        var control = new ErlTuple(new ErlInt((int)DistOp.AliasSend), from ?? NextPid(), alias);
+        await connection.SendAsync(control, message, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Replies to a <c>gen_server</c> call, matching OTP's <c>gen:reply/2</c>: an alias tag goes back
+    /// through the alias, anything else goes to the caller's pid.
+    /// </summary>
+    public Task ReplyAsync(GenCallFrom from, ErlTerm reply, ErlPid? self = null, CancellationToken ct = default)
+    {
+        var message = new ErlTuple(from.Tag, reply);
+        return from.Alias is { } alias
+            ? SendToAliasAsync(alias, message, self, ct)
+            : SendAsync(from.Caller, message, self, ct);
+    }
+
+    private async Task TrySignalAsync(string node, ErlTerm control, ErlTerm? payload = null)
+    {
+        try
+        {
+            if (_connections.TryGetValue(node, out var connection) && !connection.IsClosed)
+                await connection.SendAsync(control, payload, _cts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log($"failed to signal {node}: {ex.Message}");
+        }
+    }
+
+    private void DeliverLocal(ErlPid to, ErlTerm message, ErlPid? from)
+    {
+        if (_mailboxes.TryGetValue(to, out var mailbox)) mailbox.TryDeliver(message, from);
+    }
+
+    // ------------------------------------------------------- outgoing requests
+
+    private sealed record PendingCall(TaskCompletionSource<ErlTerm> Completion, string Node, ErlPid Self);
+
+    /// <summary>
+    /// Calls a remote <c>gen_server</c> registered under <paramref name="name"/> on
+    /// <paramref name="node"/>, using the same alias-and-monitor protocol OTP uses.
+    /// </summary>
+    public Task<ErlTerm> CallAsync(string name, string node, ErlTerm request, TimeSpan? timeout = null,
+        CancellationToken ct = default) =>
+        CallCoreAsync(new ErlAtom(name), node, request, timeout, ct);
+
+    /// <summary>Calls a remote <c>gen_server</c> by pid.</summary>
+    public Task<ErlTerm> CallAsync(ErlPid pid, ErlTerm request, TimeSpan? timeout = null,
+        CancellationToken ct = default) =>
+        CallCoreAsync(pid, pid.Node, request, timeout, ct);
+
+    private async Task<ErlTerm> CallCoreAsync(ErlTerm target, string node, ErlTerm request, TimeSpan? timeout,
+        CancellationToken ct)
+    {
+        var connection = await RequireConnectionAsync(node, ct).ConfigureAwait(false);
+        var self = NextPid();
+        var tagRef = NextRef();
+        var completion = new TaskCompletionSource<ErlTerm>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingCalls[tagRef] = new PendingCall(completion, node, self);
+
+        try
+        {
+            // Monitor first so a dead or missing server produces a DOWN instead of hanging.
+            await connection.SendAsync(new ErlTuple(
+                new ErlInt((int)DistOp.MonitorP), self, target, tagRef), ct: ct).ConfigureAwait(false);
+
+            var from = new ErlTuple(self, new ErlList([new ErlAtom("alias")], tagRef));
+            var message = new ErlTuple(new ErlAtom("$gen_call"), from, request);
+
+            var control = target is ErlPid pid
+                ? new ErlTuple(new ErlInt((int)DistOp.SendSender), self, pid)
+                : new ErlTuple(new ErlInt((int)DistOp.RegSend), self, Unused, target);
+            await connection.SendAsync(control, message, ct).ConfigureAwait(false);
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (timeout is { } t) cts.CancelAfter(t);
+            await using (cts.Token.Register(() => completion.TrySetCanceled(cts.Token)))
+                return await completion.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            throw new TimeoutException($"call to {target} on {node} timed out");
+        }
+        finally
+        {
+            _pendingCalls.TryRemove(tagRef, out _);
+            await TrySignalAsync(node, new ErlTuple(
+                new ErlInt((int)DistOp.DemonitorP), self, target, tagRef)).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Sends a <c>GenServer.cast/2</c> to a remote server.</summary>
+    public Task CastAsync(string name, string node, ErlTerm request, CancellationToken ct = default) =>
+        SendAsync(name, node, new ErlTuple(new ErlAtom("$gen_cast"), request), null, ct);
+
+    /// <summary>
+    /// Calls <c>Module:Function(Args)</c> on a remote node through its <c>rex</c> server, the same
+    /// path <c>:rpc.call/4</c> has always used.
+    /// </summary>
+    public async Task<ErlTerm> RpcAsync(string node, string module, string function, ErlTerm[] args,
+        TimeSpan? timeout = null, CancellationToken ct = default)
+    {
+        var groupLeader = NextPid();
+        var request = new ErlTuple(
+            new ErlAtom("call"), new ErlAtom(module), new ErlAtom(function), new ErlList(args), groupLeader);
+        var result = await CallAsync("rex", node, request, timeout, ct).ConfigureAwait(false);
+        if (result.IsTagged("badrpc", out var bad) && bad.Arity == 2)
+            throw new ErlangRpcException(bad[1]);
+        return result;
+    }
+
+    private void FailPendingCallsFor(string node)
+    {
+        foreach (var (key, pending) in _pendingCalls)
+        {
+            if (pending.Node != node) continue;
+            _pendingCalls.TryRemove(key, out _);
+            pending.Completion.TrySetException(new IOException($"connection to {node} was lost"));
+        }
+    }
+
+    // ------------------------------------------------------- inbound dispatch
+
+    private async Task HandleControlMessageAsync(DistConnection connection, DistMessage message)
+    {
+        if (message.Control is not ErlTuple { Arity: >= 1 } control || control[0] is not ErlInt op)
+        {
+            Log($"ignoring malformed control message {message.Control}");
+            return;
+        }
+
+        switch ((DistOp)op.AsInt)
+        {
+            case DistOp.Send or DistOp.SendTt:
+                if (control[2] is ErlPid to && message.Payload is { } body) DeliverLocal(to, body, null);
+                break;
+
+            case DistOp.SendSender or DistOp.SendSenderTt:
+                if (control[2] is ErlPid to2 && message.Payload is { } body2)
+                    DeliverLocal(to2, body2, control[1] as ErlPid);
+                break;
+
+            case DistOp.RegSend or DistOp.RegSendTt:
+                if (control[3] is ErlAtom name && message.Payload is { } body3 &&
+                    _registered.TryGetValue(name.Name, out var target))
+                    target.TryDeliver(body3, control[1] as ErlPid);
+                break;
+
+            case DistOp.AliasSend or DistOp.AliasSendTt:
+                if (control[2] is ErlRef alias) HandleAliasSend(alias, message.Payload, control[1] as ErlPid);
+                break;
+
+            case DistOp.MonitorP:
+                await HandleMonitorAsync(connection, control).ConfigureAwait(false);
+                break;
+
+            case DistOp.DemonitorP:
+                if (control[3] is ErlRef demonitorRef) RemoveIncomingMonitor(demonitorRef);
+                break;
+
+            case DistOp.MonitorPExit:
+                if (control[3] is ErlRef downRef)
+                    HandleDown(downRef, control[1], control.Arity > 4 ? control[4] : ErlAtom.NoProc);
+                break;
+
+            case DistOp.PayloadMonitorPExit:
+                if (control[3] is ErlRef downRef2)
+                    HandleDown(downRef2, control[1], message.Payload ?? ErlAtom.NoProc);
+                break;
+
+            case DistOp.Link:
+                await HandleLinkAsync(control).ConfigureAwait(false);
+                break;
+
+            case DistOp.UnlinkOld:
+                if (control[2] is ErlPid unlinkTarget && _mailboxes.TryGetValue(unlinkTarget, out var unlinkBox) &&
+                    control[1] is ErlPid unlinkFrom)
+                    unlinkBox.Links.TryRemove(unlinkFrom, out _);
+                break;
+
+            case DistOp.UnlinkId:
+                await HandleUnlinkIdAsync(connection, control).ConfigureAwait(false);
+                break;
+
+            case DistOp.UnlinkIdAck:
+                break; // nothing to undo: we drop the link as soon as we send UNLINK_ID
+
+            case DistOp.Exit or DistOp.Exit2 or DistOp.ExitTt or DistOp.Exit2Tt:
+                HandleExit(control[2], control[1], control.Arity > 3 ? control[3] : ErlAtom.Normal);
+                break;
+
+            case DistOp.PayloadExit or DistOp.PayloadExit2 or DistOp.PayloadExitTt or DistOp.PayloadExit2Tt:
+                HandleExit(control[2], control[1], message.Payload ?? ErlAtom.Normal);
+                break;
+
+            case DistOp.SpawnRequest or DistOp.SpawnRequestTt:
+                // User code runs here, so keep it off the connection's read loop.
+                _ = Task.Run(() => HandleSpawnRequestAsync(connection, control, message.Payload));
+                break;
+
+            case DistOp.SpawnReply or DistOp.SpawnReplyTt:
+                break; // we never issue spawn requests
+
+            case DistOp.GroupLeader or DistOp.NodeLink:
+                break;
+
+            default:
+                Log($"unhandled control message {message.Control}");
+                break;
+        }
+    }
+
+    private void HandleAliasSend(ErlRef alias, ErlTerm? payload, ErlPid? sender)
+    {
+        if (payload is null) return;
+
+        // A reply to one of our own gen_server calls: {[alias|Ref], Reply}.
+        if (_pendingCalls.TryGetValue(alias, out var pending) &&
+            payload is ErlTuple { Arity: 2 } replyTuple)
+        {
+            _pendingCalls.TryRemove(alias, out _);
+            pending.Completion.TrySetResult(replyTuple[1]);
+            return;
+        }
+
+        if (_aliases.TryGetValue(alias, out var mailbox)) mailbox.TryDeliver(payload, sender);
+    }
+
+    private void HandleDown(ErlRef reference, ErlTerm monitored, ErlTerm reason)
+    {
+        if (_pendingCalls.TryRemove(reference, out var pending))
+        {
+            pending.Completion.TrySetException(new ErlangExitException(reason));
+            return;
+        }
+
+        // A monitor a mailbox set itself: hand it the standard 'DOWN' tuple.
+        foreach (var mailbox in _mailboxes.Values)
+        {
+            if (!mailbox.IncomingMonitors.ContainsKey(reference)) continue;
+            mailbox.TryDeliver(new ErlTuple(
+                new ErlAtom("DOWN"), reference, new ErlAtom("process"), monitored, reason), null);
+            return;
+        }
+    }
+
+    private async Task HandleMonitorAsync(DistConnection connection, ErlTuple control)
+    {
+        if (control[1] is not ErlPid watcher || control[3] is not ErlRef reference) return;
+
+        var target = control[2] switch
+        {
+            ErlAtom named => _registered.GetValueOrDefault(named.Name),
+            ErlPid pid => _mailboxes.GetValueOrDefault(pid),
+            _ => null
+        };
+
+        if (target is null || target.IsClosed)
+        {
+            // Exactly what makes GenServer.call to a missing name fail fast instead of hanging.
+            await connection.SendAsync(new ErlTuple(
+                    new ErlInt((int)DistOp.MonitorPExit), control[2], watcher, reference, ErlAtom.NoProc))
+                .ConfigureAwait(false);
+            return;
+        }
+
+        target.IncomingMonitors[reference] = watcher;
+    }
+
+    private void RemoveIncomingMonitor(ErlRef reference)
+    {
+        foreach (var mailbox in _mailboxes.Values)
+            if (mailbox.IncomingMonitors.TryRemove(reference, out _))
+                return;
+    }
+
+    private async Task HandleLinkAsync(ErlTuple control)
+    {
+        if (control[1] is not ErlPid from || control[2] is not ErlPid toPid) return;
+
+        if (_mailboxes.TryGetValue(toPid, out var mailbox) && !mailbox.IsClosed)
+            mailbox.Links[from] = 0;
+        else
+            await TrySignalAsync(from.Node, new ErlTuple(
+                new ErlInt((int)DistOp.Exit), toPid, from, ErlAtom.NoProc)).ConfigureAwait(false);
+    }
+
+    private async Task HandleUnlinkIdAsync(DistConnection connection, ErlTuple control)
+    {
+        // {35, Id, FromPid, ToPid}; the ack echoes all three back.
+        if (control.Arity < 4 || control[2] is not ErlPid from || control[3] is not ErlPid toPid) return;
+
+        if (_mailboxes.TryGetValue(toPid, out var mailbox)) mailbox.Links.TryRemove(from, out _);
+
+        await connection.SendAsync(new ErlTuple(
+            new ErlInt((int)DistOp.UnlinkIdAck), control[1], from, toPid)).ConfigureAwait(false);
+    }
+
+    private void HandleExit(ErlTerm toTerm, ErlTerm fromTerm, ErlTerm reason)
+    {
+        if (toTerm is not ErlPid toPid || !_mailboxes.TryGetValue(toPid, out var mailbox)) return;
+
+        mailbox.Links.TryRemove(fromTerm as ErlPid ?? new ErlPid("", 0, 0, 0), out _);
+
+        if (mailbox.TrapExit)
+            mailbox.TryDeliver(new ErlTuple(new ErlAtom("EXIT"), fromTerm, reason), fromTerm as ErlPid);
+        else if (!reason.IsAtom("normal"))
+            _ = CloseMailboxAsync(mailbox, reason);
+    }
+
+    // -------------------------------------------------------- spawn requests
+
+    private async Task HandleSpawnRequestAsync(DistConnection connection, ErlTuple control, ErlTerm? payload)
+    {
+        // {29, ReqId, From, GroupLeader, {Module, Function, Arity}, OptList}, payload = ArgList
+        if (control.Arity < 6 || control[1] is not ErlRef reqId || control[2] is not ErlPid from) return;
+
+        var options = control[5] as ErlList ?? ErlList.Empty;
+        var wantsMonitor = options.Items.ToArray().Any(o => o.IsAtom("monitor"));
+        var wantsLink = options.Items.ToArray().Any(o => o.IsAtom("link"));
+        var replyMode = options.Items.ToArray()
+            .Select(o => o.IsTagged("reply", out var t) && t.Arity == 2 ? t[1].ToString() : null)
+            .FirstOrDefault(v => v is not null) ?? "yes";
+
+        var mfa = control[4] as ErlTuple;
+        var args = (payload as ErlList)?.ToArray() ?? [];
+
+        async Task ReplyErrorAsync(string reason)
+        {
+            if (replyMode is "no" or "success_only") return;
+            await connection.SendAsync(new ErlTuple(
+                new ErlInt((int)DistOp.SpawnReply), reqId, from, new ErlInt(0), new ErlAtom(reason))).ConfigureAwait(false);
+        }
+
+        if (mfa is not { Arity: 3 } || mfa[0] is not ErlAtom module || mfa[1] is not ErlAtom function)
+        {
+            await ReplyErrorAsync("badarg").ConfigureAwait(false);
+            return;
+        }
+
+        // rpc:call/4 and erpc:call/4 both arrive as erpc:execute_call/4 with the result reference first.
+        var isErpcCall = module.Name == "erpc" && function.Name == "execute_call" && args.Length == 4;
+        var isErpcCast = module.Name == "erpc" && function.Name == "execute_cast" && args.Length == 3;
+
+        if (!isErpcCall && !isErpcCast)
+        {
+            await ReplyErrorAsync("notsup").ConfigureAwait(false);
+            return;
+        }
+
+        if (RpcHandler is null)
+        {
+            await ReplyErrorAsync("notsup").ConfigureAwait(false);
+            return;
+        }
+
+        var spawned = NextPid();
+        var flags = (wantsLink ? 1 : 0) | (wantsMonitor ? 2 : 0);
+        if (replyMode is not ("no" or "error_only"))
+            await connection.SendAsync(new ErlTuple(
+                new ErlInt((int)DistOp.SpawnReply), reqId, from, new ErlInt(flags), spawned)).ConfigureAwait(false);
+
+        var resultRef = isErpcCall ? args[0] : null;
+        var offset = isErpcCall ? 1 : 0;
+        var callModule = (args[offset] as ErlAtom)?.Name ?? "";
+        var callFunction = (args[offset + 1] as ErlAtom)?.Name ?? "";
+        var callArgs = (args[offset + 2] as ErlList)?.ToArray() ?? [];
+
+        ErlTerm exitReason;
+        try
+        {
+            var value = await RpcHandler.InvokeAsync(callModule, callFunction, callArgs, _cts.Token)
+                .ConfigureAwait(false);
+            exitReason = resultRef is null
+                ? ErlAtom.Normal
+                : new ErlTuple(resultRef, new ErlAtom("return"), value);
+        }
+        catch (ErlangRpcException ex)
+        {
+            exitReason = resultRef is null
+                ? ErlAtom.Normal
+                : new ErlTuple(resultRef, new ErlAtom("error"), ex.Reason, ErlList.Empty);
+        }
+        catch (Exception ex)
+        {
+            var reason = new ErlTuple(new ErlAtom("csharp_error"), new ErlBinary(ex.Message));
+            exitReason = resultRef is null
+                ? ErlAtom.Normal
+                : new ErlTuple(resultRef, new ErlAtom("error"), reason, ErlList.Empty);
+        }
+
+        // The spawned "process" exits with the result; erpc reads it off the monitor's DOWN signal.
+        if (wantsMonitor)
+            await connection.SendAsync(new ErlTuple(
+                new ErlInt((int)DistOp.MonitorPExit), spawned, from, reqId, exitReason)).ConfigureAwait(false);
+        else if (wantsLink)
+            await connection.SendAsync(new ErlTuple(
+                new ErlInt((int)DistOp.Exit), spawned, from, exitReason)).ConfigureAwait(false);
+    }
+
+    // -------------------------------------------------------------- utilities
+
+    /// <summary>Allocates a fresh pid on this node.</summary>
+    public ErlPid NextPid()
+    {
+        var id = Interlocked.Increment(ref _pidId);
+        if (id == 0) Interlocked.Increment(ref _pidSerial);
+        return new ErlPid(Name.Full, id, Volatile.Read(ref _pidSerial), Creation);
+    }
+
+    /// <summary>Allocates a fresh reference on this node.</summary>
+    public ErlRef NextRef()
+    {
+        var n = (ulong)Interlocked.Increment(ref _refCounter);
+        return new ErlRef(Name.Full, Creation,
+            [(uint)(n & 0xFFFFFFFF), (uint)(n >> 32), (uint)Random.Shared.Next()]);
+    }
+
+    private static string? ReadCookieFile()
+    {
+        var path = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".erlang.cookie");
+        return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
+    }
+
+    private void Log(string message) => _options.Log?.Invoke(message);
+
+    public async ValueTask DisposeAsync()
+    {
+        await _cts.CancelAsync().ConfigureAwait(false);
+        _listener?.Stop();
+
+        foreach (var connection in _connections.Values) await connection.DisposeAsync().ConfigureAwait(false);
+        _connections.Clear();
+
+        await _epmd.DisposeAsync().ConfigureAwait(false);
+        _connectLock.Dispose();
+        _cts.Dispose();
+    }
+}
+
+/// <summary>Raised when a remote process a call depended on exited.</summary>
+public sealed class ErlangExitException : Exception
+{
+    public ErlangExitException(ErlTerm reason) : base($"the remote process exited with reason {reason}") =>
+        Reason = reason;
+
+    /// <summary>The Erlang exit reason.</summary>
+    public ErlTerm Reason { get; }
+}
+
+/// <summary>Answers <c>net_adm:ping/1</c> so <c>Node.ping/1</c> returns <c>:pong</c>.</summary>
+internal sealed class NetKernelServer : ErlangGenServer
+{
+    public override ValueTask<ErlTerm?> HandleCallAsync(ErlTerm request, GenCallFrom from, CancellationToken ct) =>
+        ValueTask.FromResult<ErlTerm?>(request.IsTagged("is_auth", out _) ? new ErlAtom("yes") : new ErlAtom("error"));
+}
