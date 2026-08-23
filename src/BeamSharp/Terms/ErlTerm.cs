@@ -225,7 +225,11 @@ public sealed class ErlList : ErlTerm
     public ErlList(IEnumerable<ErlTerm> items, ErlTerm? tail = null)
     {
         _items = items.ToArray();
-        Tail = tail;
+
+        // [X|[]] is [X]: a tail of the empty list is what makes a list proper, not a thing the list
+        // ends with. Normalising here keeps one value from having two representations, which would
+        // otherwise make equality disagree with Erlang and break round-tripping through the codec.
+        Tail = tail is ErlList { Count: 0, IsProper: true } ? null : tail;
     }
 
     public ErlList(params ErlTerm[] items) : this((IEnumerable<ErlTerm>)items, null) { }

@@ -7,29 +7,44 @@ namespace BeamSharp.Terms;
 /// <summary>Decodes the Erlang External Term Format into <see cref="ErlTerm"/> values.</summary>
 public ref struct TermDecoder
 {
-    private ReadOnlySpan<byte> _data;
-    private int _pos;
+    /// <summary>
+    /// How deeply terms may nest before decoding gives up.
+    /// <para>
+    /// Nesting costs two bytes a level on the wire — <c>{104, 1}</c> is a one-element tuple — so a
+    /// 40 KB frame can nest twenty thousand deep, and this decoder walks nesting with the call
+    /// stack. Overflowing it is not an exception that can be caught: the runtime aborts the process.
+    /// For comparison, System.Text.Json defaults to 64.
+    /// </para>
+    /// </summary>
+    public const int DefaultMaxDepth = 256;
 
-    public TermDecoder(ReadOnlySpan<byte> data)
+    private ReadOnlySpan<byte> _data;
+    private readonly int _maxDepth;
+    private int _pos;
+    private int _depth;
+
+    public TermDecoder(ReadOnlySpan<byte> data, int maxDepth = DefaultMaxDepth)
     {
         _data = data;
+        _maxDepth = maxDepth;
         _pos = 0;
+        _depth = 0;
     }
 
     /// <summary>Bytes consumed so far.</summary>
     public int Position => _pos;
 
     /// <summary>Decodes one term including the leading version magic byte (131).</summary>
-    public static ErlTerm Decode(ReadOnlySpan<byte> data)
+    public static ErlTerm Decode(ReadOnlySpan<byte> data, int maxDepth = DefaultMaxDepth)
     {
-        var d = new TermDecoder(data);
+        var d = new TermDecoder(data, maxDepth);
         return d.ReadVersionedTerm();
     }
 
     /// <summary>Decodes one term including the leading 131, reporting how many bytes it used.</summary>
-    public static ErlTerm Decode(ReadOnlySpan<byte> data, out int consumed)
+    public static ErlTerm Decode(ReadOnlySpan<byte> data, out int consumed, int maxDepth = DefaultMaxDepth)
     {
-        var d = new TermDecoder(data);
+        var d = new TermDecoder(data, maxDepth);
         var term = d.ReadVersionedTerm();
         consumed = d.Position;
         return term;
@@ -44,6 +59,22 @@ public ref struct TermDecoder
     }
 
     public ErlTerm ReadTerm()
+    {
+        if (++_depth > _maxDepth)
+            throw new ErlDecodeException(
+                $"terms are nested deeper than {_maxDepth} levels; refusing to recurse further");
+
+        try
+        {
+            return ReadTermCore();
+        }
+        finally
+        {
+            _depth--;
+        }
+    }
+
+    private ErlTerm ReadTermCore()
     {
         var tag = ReadByte();
         switch (tag)
