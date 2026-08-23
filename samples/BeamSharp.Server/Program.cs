@@ -9,7 +9,7 @@ using BeamSharp.Terms;
 //   dotnet run --project samples/BeamSharp.Server -- [nodename] [cookie]
 
 var flagValues = args.SkipWhile(a => a != "--tls").Skip(1).Take(1).ToArray();
-var positional = args.Where(a => !a.StartsWith("--") && !flagValues.Contains(a)).ToArray();
+var positional = args.Where(a => !a.StartsWith("--", StringComparison.Ordinal) && !flagValues.Contains(a)).ToArray();
 var nodeName = positional.Length > 0 ? positional[0] : $"csharp@{NodeName.LocalShortHost}";
 var cookie = positional.Length > 1 ? positional[1] : null;
 

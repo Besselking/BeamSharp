@@ -61,7 +61,7 @@ public sealed class ErlAtom : ErlTerm
     };
 
     public override bool Equals(ErlTerm? other) => other is ErlAtom a && a.Name == Name;
-    public override int GetHashCode() => HashCode.Combine(typeof(ErlAtom), Name);
+    public override int GetHashCode() => HashCode.Combine(nameof(ErlAtom), Name);
 
     internal override void Format(StringBuilder sb)
     {
@@ -87,7 +87,7 @@ public sealed class ErlInt : ErlTerm
     public int AsInt => (int)Value;
 
     public override bool Equals(ErlTerm? other) => other is ErlInt i && i.Value == Value;
-    public override int GetHashCode() => HashCode.Combine(typeof(ErlInt), Value);
+    public override int GetHashCode() => HashCode.Combine(nameof(ErlInt), Value);
     internal override void Format(StringBuilder sb) => sb.Append(Value.ToString(CultureInfo.InvariantCulture));
 }
 
@@ -99,7 +99,7 @@ public sealed class ErlFloat : ErlTerm
     public ErlFloat(double value) => Value = value;
 
     public override bool Equals(ErlTerm? other) => other is ErlFloat f && f.Value.Equals(Value);
-    public override int GetHashCode() => HashCode.Combine(typeof(ErlFloat), Value);
+    public override int GetHashCode() => HashCode.Combine(nameof(ErlFloat), Value);
 
     internal override void Format(StringBuilder sb)
     {
@@ -127,7 +127,7 @@ public sealed class ErlBinary : ErlTerm
     public override int GetHashCode()
     {
         var hc = new HashCode();
-        hc.Add(typeof(ErlBinary));
+        hc.Add(nameof(ErlBinary));
         hc.AddBytes(Data);
         return hc.ToHashCode();
     }
@@ -162,7 +162,7 @@ public sealed class ErlBitstring : ErlTerm
     public override int GetHashCode()
     {
         var hc = new HashCode();
-        hc.Add(typeof(ErlBitstring));
+        hc.Add(nameof(ErlBitstring));
         hc.Add(TrailingBits);
         hc.AddBytes(Data);
         return hc.ToHashCode();
@@ -195,7 +195,7 @@ public sealed class ErlTuple : ErlTerm
     public override int GetHashCode()
     {
         var hc = new HashCode();
-        hc.Add(typeof(ErlTuple));
+        hc.Add(nameof(ErlTuple));
         foreach (var i in _items) hc.Add(i);
         return hc.ToHashCode();
     }
@@ -258,7 +258,7 @@ public sealed class ErlList : ErlTerm
     public override int GetHashCode()
     {
         var hc = new HashCode();
-        hc.Add(typeof(ErlList));
+        hc.Add(nameof(ErlList));
         foreach (var i in _items) hc.Add(i);
         hc.Add(Tail);
         return hc.ToHashCode();
@@ -322,7 +322,7 @@ public sealed class ErlMap : ErlTerm
     public override int GetHashCode()
     {
         // Order-independent, as map key order is not significant.
-        var acc = typeof(ErlMap).GetHashCode();
+        var acc = nameof(ErlMap).GetHashCode();
         foreach (var (k, v) in _entries) acc ^= HashCode.Combine(k, v);
         return acc;
     }
@@ -362,9 +362,10 @@ public sealed class ErlPid : ErlTerm
     public override bool Equals(ErlTerm? other) =>
         other is ErlPid p && p.Node == Node && p.Id == Id && p.Serial == Serial && p.Creation == Creation;
 
-    public override int GetHashCode() => HashCode.Combine(typeof(ErlPid), Node, Id, Serial, Creation);
+    public override int GetHashCode() => HashCode.Combine(nameof(ErlPid), Node, Id, Serial, Creation);
 
-    internal override void Format(StringBuilder sb) => sb.Append($"<{Node}.{Id}.{Serial}>");
+    internal override void Format(StringBuilder sb) =>
+        sb.Append(CultureInfo.InvariantCulture, $"<{Node}.{Id}.{Serial}>");
 }
 
 /// <summary>A port identifier. Ports are opaque here; they exist so terms round-trip.</summary>
@@ -384,8 +385,9 @@ public sealed class ErlPort : ErlTerm
     public override bool Equals(ErlTerm? other) =>
         other is ErlPort p && p.Node == Node && p.Id == Id && p.Creation == Creation;
 
-    public override int GetHashCode() => HashCode.Combine(typeof(ErlPort), Node, Id, Creation);
-    internal override void Format(StringBuilder sb) => sb.Append($"#Port<{Node}.{Id}>");
+    public override int GetHashCode() => HashCode.Combine(nameof(ErlPort), Node, Id, Creation);
+    internal override void Format(StringBuilder sb) =>
+        sb.Append(CultureInfo.InvariantCulture, $"#Port<{Node}.{Id}>");
 }
 
 /// <summary>A reference — also what an Elixir <c>alias</c> is made of.</summary>
@@ -408,7 +410,7 @@ public sealed class ErlRef : ErlTerm
     public override int GetHashCode()
     {
         var hc = new HashCode();
-        hc.Add(typeof(ErlRef));
+        hc.Add(nameof(ErlRef));
         hc.Add(Node);
         hc.Add(Creation);
         foreach (var i in Ids) hc.Add(i);
@@ -436,8 +438,9 @@ public sealed class ErlExport : ErlTerm
     public override bool Equals(ErlTerm? other) =>
         other is ErlExport e && e.Module.Equals(Module) && e.Function.Equals(Function) && e.Arity == Arity;
 
-    public override int GetHashCode() => HashCode.Combine(typeof(ErlExport), Module, Function, Arity);
-    internal override void Format(StringBuilder sb) => sb.Append($"fun {Module.Name}:{Function.Name}/{Arity}");
+    public override int GetHashCode() => HashCode.Combine(nameof(ErlExport), Module, Function, Arity);
+    internal override void Format(StringBuilder sb) =>
+        sb.Append(CultureInfo.InvariantCulture, $"fun {Module.Name}:{Function.Name}/{Arity}");
 }
 
 /// <summary>
@@ -456,7 +459,7 @@ public sealed class ErlFun : ErlTerm
     public override int GetHashCode()
     {
         var hc = new HashCode();
-        hc.Add(typeof(ErlFun));
+        hc.Add(nameof(ErlFun));
         hc.AddBytes(Encoded);
         return hc.ToHashCode();
     }

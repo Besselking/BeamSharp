@@ -1,0 +1,57 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml,json}]
+indent_size = 2
+
+[*.{sh,escript,exs}]
+end_of_line = lf
+
+# ---------------------------------------------------------------------------
+# Analyzer decisions.
+#
+# Everything not listed here stays on, and CI builds with -warnaserror. A rule
+# is only turned off with a reason, because a warning is worth understanding
+# even when the conclusion is that it does not apply.
+# ---------------------------------------------------------------------------
+
+[*.cs]
+
+# The public API deliberately mirrors Erlang's type names — Erl.Int, Erl.String,
+# ErlBinary, ErlList. Naming them after the terms they represent is the whole
+# point of the surface, and renaming them to satisfy the rule would make the
+# mapping harder to see.
+dotnet_diagnostic.CA1720.severity = none
+dotnet_diagnostic.CA1716.severity = none
+dotnet_diagnostic.CA1711.severity = none
+
+# LoggerMessage source generation, for a library that logs a handful of
+# lifecycle events per connection. The delegates would cost more in ceremony
+# than they save; worth revisiting if anything starts logging per message.
+dotnet_diagnostic.CA1848.severity = none
+dotnet_diagnostic.CA1873.severity = none
+
+# Non-shipping code: samples, tests, benchmarks and the AOT probe.
+[{test,samples,bench}/**/*.cs]
+
+# Test names are sentences — A_record_round_trips_through_its_primary_constructor
+# reads as documentation, and underscores are what make it readable.
+dotnet_diagnostic.CA1707.severity = none
+
+# Sealing demo and fixture types adds noise to code whose job is to be read.
+# Still enforced in src/.
+dotnet_diagnostic.CA1852.severity = none
+
+# A public field in a fixture model is the point: it is what exercises
+# ErlSerializerOptions.IncludeFields.
+dotnet_diagnostic.CA1051.severity = none
+
+# Micro-optimisations that do not pay for themselves outside shipping code.
+dotnet_diagnostic.CA1861.severity = none
+dotnet_diagnostic.CA2263.severity = none

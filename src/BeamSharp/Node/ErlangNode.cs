@@ -107,7 +107,9 @@ public sealed class ErlangNode : IAsyncDisposable
 
         if (_options.ProvideNetKernel) RegisterGenServer("net_kernel", new NetKernelServer());
 
-        _ = Task.Run(() => AcceptLoopAsync(_cts.Token));
+        // Deliberately not the caller's token: the listener lives as long as the node, not as long
+        // as the call that started it.
+        _ = Task.Run(() => AcceptLoopAsync(_cts.Token), CancellationToken.None);
     }
 
     private async Task AcceptLoopAsync(CancellationToken ct)
@@ -140,7 +142,8 @@ public sealed class ErlangNode : IAsyncDisposable
                         .AcceptAsync(stream, Name.Full, Creation, _options.Flags, _ => Cookie,
                             HandshakePrefix, attempt.Token)
                         .ConfigureAwait(false);
-                    AttachConnection(new DistConnection(client, stream, handshake, _options.TickTime));
+                    await AttachConnectionAsync(new DistConnection(client, stream, handshake, _options.TickTime))
+                        .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
@@ -187,7 +190,8 @@ public sealed class ErlangNode : IAsyncDisposable
                 .ConnectAsync(stream, Name.Full, Creation, _options.Flags, peerNode, Cookie,
                     HandshakePrefix, attempt.Token)
                 .ConfigureAwait(false);
-            AttachConnection(new DistConnection(client, stream, handshake, _options.TickTime));
+            await AttachConnectionAsync(new DistConnection(client, stream, handshake, _options.TickTime))
+                .ConfigureAwait(false);
             return true;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -248,7 +252,7 @@ public sealed class ErlangNode : IAsyncDisposable
         }
     }
 
-    private void AttachConnection(DistConnection connection)
+    private async Task AttachConnectionAsync(DistConnection connection)
     {
         connection.OnMessage = HandleControlMessageAsync;
         connection.Closed = (c, error) =>
@@ -262,7 +266,7 @@ public sealed class ErlangNode : IAsyncDisposable
         if (_connections.TryGetValue(connection.PeerNode, out var existing) && !existing.IsClosed)
         {
             // Simultaneous connect: keep the one already established.
-            _ = connection.DisposeAsync();
+            await connection.DisposeAsync().ConfigureAwait(false);
             return;
         }
 
@@ -455,7 +459,10 @@ public sealed class ErlangNode : IAsyncDisposable
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             if (timeout is { } t) cts.CancelAfter(t);
-            await using (cts.Token.Register(() => completion.TrySetCanceled(cts.Token)))
+            // ConfigureAwait on the registration too: this is a library, and disposing it must not
+            // resume on a caller's synchronization context.
+            var registration = cts.Token.Register(() => completion.TrySetCanceled(cts.Token));
+            await using (registration.ConfigureAwait(false))
                 return await completion.Task.ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
@@ -578,11 +585,13 @@ public sealed class ErlangNode : IAsyncDisposable
                 break; // nothing to undo: we drop the link as soon as we send UNLINK_ID
 
             case DistOp.Exit or DistOp.Exit2 or DistOp.ExitTt or DistOp.Exit2Tt:
-                HandleExit(control[2], control[1], control.Arity > 3 ? control[3] : ErlAtom.Normal);
+                await HandleExitAsync(control[2], control[1],
+                    control.Arity > 3 ? control[3] : ErlAtom.Normal).ConfigureAwait(false);
                 break;
 
             case DistOp.PayloadExit or DistOp.PayloadExit2 or DistOp.PayloadExitTt or DistOp.PayloadExit2Tt:
-                HandleExit(control[2], control[1], message.Payload ?? ErlAtom.Normal);
+                await HandleExitAsync(control[2], control[1],
+                    message.Payload ?? ErlAtom.Normal).ConfigureAwait(false);
                 break;
 
             case DistOp.SpawnRequest or DistOp.SpawnRequestTt:
@@ -717,7 +726,7 @@ public sealed class ErlangNode : IAsyncDisposable
             new ErlInt((int)DistOp.UnlinkIdAck), control[1], from, toPid)).ConfigureAwait(false);
     }
 
-    private void HandleExit(ErlTerm toTerm, ErlTerm fromTerm, ErlTerm reason)
+    private async Task HandleExitAsync(ErlTerm toTerm, ErlTerm fromTerm, ErlTerm reason)
     {
         if (toTerm is not ErlPid toPid || !_mailboxes.TryGetValue(toPid, out var mailbox)) return;
 
@@ -726,7 +735,7 @@ public sealed class ErlangNode : IAsyncDisposable
         if (mailbox.TrapExit)
             mailbox.TryDeliver(new ErlTuple(new ErlAtom("EXIT"), fromTerm, reason), fromTerm as ErlPid);
         else if (!reason.IsAtom("normal"))
-            _ = CloseMailboxAsync(mailbox, reason);
+            await CloseMailboxAsync(mailbox, reason).ConfigureAwait(false);
     }
 
     // -------------------------------------------------------- spawn requests

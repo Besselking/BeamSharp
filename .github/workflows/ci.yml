@@ -26,6 +26,9 @@ jobs:
           otp-version: '27'
       - run: epmd -daemon
         if: runner.os == 'Linux'
+      # Warnings fail here rather than only annotating. An analyzer warning is worth looking at
+      # even when the conclusion is to suppress it with a reason.
+      - run: dotnet build --nologo -warnaserror
       - run: dotnet test --nologo
 
   aot:
