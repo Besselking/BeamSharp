@@ -77,6 +77,9 @@ public sealed class ErlangNode : IAsyncDisposable
     /// <summary>Names of the peers currently connected.</summary>
     public IReadOnlyCollection<string> ConnectedNodes => _connections.Keys.ToArray();
 
+    /// <summary>The live connections, so tests can put bytes on the wire a well-behaved peer never would.</summary>
+    internal IReadOnlyDictionary<string, DistConnection> Connections => _connections;
+
     /// <summary>Handles incoming <c>:rpc.call/4</c> and <c>:erpc.call/4</c>. Null rejects them.</summary>
     public IErlangRpcHandler? RpcHandler { get; set; }
 
@@ -507,7 +510,18 @@ public sealed class ErlangNode : IAsyncDisposable
             return;
         }
 
-        switch ((DistOp)op.AsInt)
+        var operation = (DistOp)op.AsInt;
+
+        // The dispatcher reads fields out of the tuple by position, so the arity has to be checked
+        // before it does. A peer past the cookie is still not one that has to be well behaved, and
+        // an index out of range here would propagate to the read loop and drop the connection.
+        if (control.Arity < MinimumArity(operation))
+        {
+            Log($"ignoring {operation} control message with only {control.Arity} elements");
+            return;
+        }
+
+        switch (operation)
         {
             case DistOp.Send or DistOp.SendTt:
                 if (control[2] is ErlPid to && message.Payload is { } body) DeliverLocal(to, body, null);
@@ -587,6 +601,35 @@ public sealed class ErlangNode : IAsyncDisposable
                 break;
         }
     }
+
+    /// <summary>
+    /// How many elements a control tuple must have before its fields can be read.
+    /// <para>
+    /// These come from the control message layouts in the distribution protocol; an operation this
+    /// node does not act on needs only the opcode, since it is dropped anyway.
+    /// </para>
+    /// </summary>
+    private static int MinimumArity(DistOp op) => op switch
+    {
+        DistOp.Send or DistOp.SendSender or DistOp.AliasSend => 3,
+        DistOp.SendTt or DistOp.SendSenderTt or DistOp.AliasSendTt => 4,
+        DistOp.RegSend => 4,
+        DistOp.RegSendTt => 5,
+        DistOp.Link or DistOp.UnlinkOld or DistOp.GroupLeader => 3,
+        DistOp.Exit or DistOp.Exit2 => 4,
+        DistOp.ExitTt or DistOp.Exit2Tt => 5,
+        DistOp.PayloadExit or DistOp.PayloadExit2 => 3,
+        DistOp.PayloadExitTt or DistOp.PayloadExit2Tt => 4,
+        DistOp.MonitorP or DistOp.DemonitorP => 4,
+        DistOp.MonitorPExit => 5,
+        DistOp.PayloadMonitorPExit => 4,
+        DistOp.UnlinkId or DistOp.UnlinkIdAck => 4,
+        DistOp.SpawnRequest => 6,
+        DistOp.SpawnRequestTt => 7,
+        DistOp.SpawnReply => 5,
+        DistOp.SpawnReplyTt => 6,
+        _ => 1
+    };
 
     private void HandleAliasSend(ErlRef alias, ErlTerm? payload, ErlPid? sender)
     {
