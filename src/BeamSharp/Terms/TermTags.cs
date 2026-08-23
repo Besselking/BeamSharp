@@ -1,7 +1,7 @@
 namespace BeamSharp.Terms;
 
 /// <summary>External Term Format tag bytes. Verified against OTP 29 output.</summary>
-internal static class TermTags
+public static class TermTags
 {
     public const byte VersionMagic = 131;
 

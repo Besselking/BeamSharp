@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net.Sockets;
+using System.Threading.Channels;
 using BeamSharp.Terms;
 
 namespace BeamSharp.Protocol;
@@ -21,8 +22,24 @@ public sealed class DistConnection : IAsyncDisposable
 
     private readonly TcpClient _client;
     private readonly NetworkStream _stream;
-    private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
+
+    /// <summary>
+    /// Outbound frames, drained by a single writer.
+    /// <para>
+    /// Inbound signals like a noproc DOWN or an unlink ack are answered from the read loop. Writing
+    /// those straight to the socket means that while the write is in flight we are not reading, so
+    /// a peer whose receive window is full stalls us, which stalls it — a deadlock broken only by
+    /// the tick timeout. Handing frames to a writer keeps the read loop reading, and the channel
+    /// preserves the order signals were produced in.
+    /// </para>
+    /// </summary>
+    private readonly Channel<ReadOnlyMemory<byte>> _outbound =
+        Channel.CreateBounded<ReadOnlyMemory<byte>>(new BoundedChannelOptions(4096)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.Wait
+        });
 
     private long _lastReceivedTicks;
     private long _lastSentTicks;
@@ -55,6 +72,7 @@ public sealed class DistConnection : IAsyncDisposable
     /// <summary>Starts the read loop and the keepalive ticker.</summary>
     public void Start()
     {
+        _ = Task.Run(WriteLoopAsync);
         _ = Task.Run(ReadLoopAsync);
         _ = Task.Run(TickLoopAsync);
     }
@@ -72,21 +90,38 @@ public sealed class DistConnection : IAsyncDisposable
         if (payload is not null) enc.WriteVersionedTerm(payload);
         enc.PatchUInt32(0, (uint)(enc.Length - 4));
 
-        await WriteRawAsync(enc.Segment, ct).ConfigureAwait(false);
+        await EnqueueAsync(enc.Segment, ct).ConfigureAwait(false);
     }
 
-    private async Task WriteRawAsync(ArraySegment<byte> bytes, CancellationToken ct)
+    /// <summary>Queues a frame. Returns once it is accepted, not once it reaches the peer.</summary>
+    private async Task EnqueueAsync(ReadOnlyMemory<byte> bytes, CancellationToken ct)
     {
-        await _writeLock.WaitAsync(ct).ConfigureAwait(false);
+        if (IsClosed) throw new IOException($"connection to {PeerNode} is closed");
+
         try
         {
-            if (IsClosed) throw new IOException($"connection to {PeerNode} is closed");
-            await _stream.WriteAsync(bytes, ct).ConfigureAwait(false);
-            _lastSentTicks = Environment.TickCount64;
+            await _outbound.Writer.WriteAsync(bytes, ct).ConfigureAwait(false);
         }
-        finally
+        catch (ChannelClosedException)
         {
-            _writeLock.Release();
+            throw new IOException($"connection to {PeerNode} is closed");
+        }
+    }
+
+    private async Task WriteLoopAsync()
+    {
+        try
+        {
+            await foreach (var frame in _outbound.Reader.ReadAllAsync(_cts.Token).ConfigureAwait(false))
+            {
+                await _stream.WriteAsync(frame, _cts.Token).ConfigureAwait(false);
+                _lastSentTicks = Environment.TickCount64;
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            CloseInternal(ex);
         }
     }
 
@@ -170,7 +205,7 @@ public sealed class DistConnection : IAsyncDisposable
                 }
 
                 if (now - Volatile.Read(ref _lastSentTicks) >= interval.TotalMilliseconds)
-                    await WriteRawAsync(new ArraySegment<byte>(new byte[4]), _cts.Token).ConfigureAwait(false);
+                    await EnqueueAsync(new byte[4], _cts.Token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) { }
@@ -183,6 +218,7 @@ public sealed class DistConnection : IAsyncDisposable
     private void CloseInternal(Exception? error)
     {
         if (Interlocked.Exchange(ref _closed, 1) != 0) return;
+        _outbound.Writer.TryComplete();
         try { _cts.Cancel(); } catch { /* already disposed */ }
         try { _client.Close(); } catch { /* best effort */ }
         Closed?.Invoke(this, error);
@@ -193,7 +229,6 @@ public sealed class DistConnection : IAsyncDisposable
         CloseInternal(null);
         _cts.Dispose();
         _client.Dispose();
-        _writeLock.Dispose();
         return ValueTask.CompletedTask;
     }
 }
