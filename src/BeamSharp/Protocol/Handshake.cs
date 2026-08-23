@@ -124,6 +124,11 @@ public static class Handshake
         var peerChallenge = BinaryPrimitives.ReadUInt32BigEndian(challengeMsg.AsSpan(9));
         var peerCreation = BinaryPrimitives.ReadUInt32BigEndian(challengeMsg.AsSpan(13));
         var nameLen = BinaryPrimitives.ReadUInt16BigEndian(challengeMsg.AsSpan(17));
+        // The name message parser checks this; the challenge parser did not, so a peer could claim
+        // a longer name than it sent. EPMD is unauthenticated, so what answers on the port it named
+        // is not necessarily what we meant to reach.
+        if (challengeMsg.Length < 19 + nameLen)
+            throw new HandshakeException("the challenge message claims a longer node name than it carries");
         var peerNode = Encoding.UTF8.GetString(challengeMsg, 19, nameLen);
 
         if (peerNode != expectedPeerNode)
