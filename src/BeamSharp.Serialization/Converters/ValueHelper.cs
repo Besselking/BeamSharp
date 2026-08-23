@@ -43,21 +43,18 @@ internal sealed class NullableConverterFactory : ErlConverterFactory
 
     public override bool CanConvert(Type type) => Nullable.GetUnderlyingType(type) is not null;
 
+        [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = Justifications.ReflectionFallback)]
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2071",
+        Justification = Justifications.ReflectionFallback)]
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = Justifications.ReflectionFallback)]
     public override ErlConverter CreateConverter(Type type, ErlSerializerOptions options)
     {
         var inner = Nullable.GetUnderlyingType(type)!;
-        return ConverterActivator.Create(
-            typeof(NullableConverter<>).MakeGenericType(inner), options.GetConverter(inner));
+        return ConverterActivator.Create(typeof(ErlNullableConverter<>).MakeGenericType(inner), options);
     }
 
-    private sealed class NullableConverter<T>(ErlConverter<T> inner) : ErlConverter<T?> where T : struct
-    {
-        public override ErlTerm Write(T? value, ErlSerializerOptions options) =>
-            value.HasValue ? inner.Write(value.Value, options) : options.NullAtom;
-
-        public override T? Read(ErlTerm term, ErlSerializerOptions options) =>
-            ValueHelper.IsNull(term, options) ? null : inner.Read(term, options);
-    }
 }
 
 /// <summary>
@@ -70,49 +67,13 @@ internal sealed class EnumConverterFactory : ErlConverterFactory
 
     public override bool CanConvert(Type type) => type.IsEnum;
 
+        [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = Justifications.ReflectionFallback)]
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2071",
+        Justification = Justifications.ReflectionFallback)]
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = Justifications.ReflectionFallback)]
     public override ErlConverter CreateConverter(Type type, ErlSerializerOptions options) =>
-        ConverterActivator.Create(typeof(EnumConverter<>).MakeGenericType(type), options);
+        ConverterActivator.Create(typeof(ErlEnumConverter<>).MakeGenericType(type), options);
 
-    private sealed class EnumConverter<T> : ErlConverter<T> where T : struct, Enum
-    {
-        private readonly Dictionary<T, string> _toAtom = new();
-        private readonly Dictionary<string, T> _fromAtom = new(StringComparer.Ordinal);
-
-        public EnumConverter(ErlSerializerOptions options)
-        {
-            foreach (var name in Enum.GetNames<T>())
-            {
-                var value = Enum.Parse<T>(name);
-                var field = typeof(T).GetField(name)!;
-                var atom = field.GetCustomAttributes(typeof(ErlPropertyAttribute), false)
-                               .Cast<ErlPropertyAttribute>().FirstOrDefault()?.Name
-                           ?? options.EnumNamingPolicy.ConvertName(name);
-
-                _toAtom.TryAdd(value, atom);
-                _fromAtom[atom] = value;
-            }
-        }
-
-        public override ErlTerm Write(T value, ErlSerializerOptions options) =>
-            _toAtom.TryGetValue(value, out var atom)
-                ? new ErlAtom(atom)
-                : new ErlInt(Convert.ToInt64(value, System.Globalization.CultureInfo.InvariantCulture));
-
-        public override T Read(ErlTerm term, ErlSerializerOptions options)
-        {
-            switch (term)
-            {
-                case ErlAtom a when _fromAtom.TryGetValue(a.Name, out var value):
-                    return value;
-                case ErlAtom a:
-                    throw new ErlSerializationException(
-                        $"'{a.Name}' is not a member of {typeof(T).Name}; expected one of " +
-                        string.Join(", ", _fromAtom.Keys));
-                case ErlInt i:
-                    return (T)Enum.ToObject(typeof(T), (long)i.Value);
-                default:
-                    throw TermRead.Mismatch(term, $"an atom naming a {typeof(T).Name}");
-            }
-        }
-    }
 }

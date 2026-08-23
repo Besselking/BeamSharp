@@ -12,8 +12,13 @@ internal sealed class ObjectConverterFactory : ErlConverterFactory
 {
     public static readonly ObjectConverterFactory Instance = new();
 
+
     public override bool CanConvert(Type type) => true;
 
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = Justifications.ReflectionFallback)]
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = Justifications.ReflectionFallback)]
     public override ErlConverter CreateConverter(Type type, ErlSerializerOptions options) =>
         ConverterActivator.Create(typeof(ObjectConverter<>).MakeGenericType(type), options);
 }
@@ -134,6 +139,8 @@ internal sealed class ObjectConverter<T> : ErlConverter<T>
         return ValueHelper.Read(value, member.Type, options);
     }
 
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2087",
+        Justification = Justifications.ReflectionFallback)]
     private T Construct(Dictionary<Member, object?> values)
     {
         object instance;
@@ -193,6 +200,8 @@ internal sealed class ObjectConverter<T> : ErlConverter<T>
         public ErlConverter? Converter { get; init; }
     }
 
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2070",
+        Justification = Justifications.ReflectionFallback)]
     private static List<Member> CollectMembers(Type type, ErlSerializerOptions options)
     {
         var members = new List<Member>();
@@ -261,6 +270,10 @@ internal sealed class ObjectConverter<T> : ErlConverter<T>
         return null;
     }
 
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2070",
+        Justification = Justifications.ReflectionFallback)]
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2072",
+        Justification = Justifications.ReflectionFallback)]
     private static (ConstructorInfo?, Member?[], object?[], bool) PlanConstruction(Type type, Member[] members)
     {
         var constructors = type.GetConstructors(BindingFlags.Public | BindingFlags.Instance);

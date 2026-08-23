@@ -181,7 +181,7 @@ suite asserts this against a live Elixir node rather than against our own reader
 Naming, key kind, null representation and the rest are configurable through `ErlSerializerOptions`.
 `[ErlProperty]`, `[ErlIgnore]`, `[ErlConvert]` and `[ErlAsAtom]` cover the per-member cases.
 
-### Extending it, and the road to AOT
+### Extending it
 
 There is exactly one extension point, `ErlConverter<T>`:
 
@@ -197,21 +197,59 @@ sealed class MoneyConverter : ErlConverter<Money>
 options.Converters.Add(new MoneyConverter());
 ```
 
-Built-in conversions, the reflection fallback for plain objects, and anything a source generator
-emits are all the same kind of thing. That is deliberate: generated converters do not need a second
-API to slot into, they just get registered ahead of the reflection fallback.
+Built-in conversions, the reflection fallback for plain objects, and everything the source generator
+emits are all the same kind of thing. That is what lets generated code replace reflection without a
+second API.
 
-Reflection is therefore a replaceable default rather than a requirement. Set
-`UseReflection = false` and any type without a registered converter fails at the call site with a
-message naming it, instead of silently depending on metadata a trimmer may have dropped:
+### NativeAOT and trimming
+
+Reflection is a convenience, not a requirement. List your types on a context and a source generator
+writes the converters at compile time:
 
 ```csharp
-var options = new ErlSerializerOptions { UseReflection = false };
-options.Converters.Add(new PersonConverter());   // hand-written today, generated later
+[ErlSerializable(typeof(Person))]
+[ErlSerializable(typeof(Order))]
+internal partial class AppTerms : ErlSerializerContext;
+
+var term = ErlSerializer.Serialize(person, AppTerms.Default);
 ```
 
-The reflection implementation reads members through `PropertyInfo`, which is fine for message-rate
-work and is the part a source generator would make fast as well as AOT-safe.
+A context turns `UseReflection` off, so a type you forgot to declare fails at the call site naming
+itself rather than depending on metadata a trimmer removed:
+
+```
+no converter is registered for MyApp.Invoice and UseReflection is off. Register a converter
+for it, or turn reflection back on if you are not targeting AOT.
+```
+
+The generator also writes out the converter instantiations for member types — enums, `List<T>`,
+`Dictionary<K,V>`, `T?` — reached from the types you declared. That matters more than it looks:
+reaching those through `MakeGenericType` leaves the native code for the instantiation unreachable,
+and the app dies at runtime with *"missing native code or metadata"*. Writing `new
+ErlCollectionConverter<List<Person>, Person>()` roots it.
+
+This is verified rather than asserted. `test/run_aot_probe.sh` publishes a real console app with
+`PublishAot=true`, fails if the publish emits a single trim or AOT warning, and runs the resulting
+native binary — including a case that would only pass if enums, lists, dictionaries and nullables
+all work without reflection. CI runs it on every push.
+
+The generator's contract is that it produces *the same terms reflection does*, so the two are tested
+against each other rather than each against a separately written expectation:
+
+```csharp
+Assert.Equal(
+    ErlSerializer.Serialize(value, reflectionOptions),
+    ErlSerializer.Serialize(value, GeneratedContext.Default));
+```
+
+That equivalence holds across every shape and every option — naming policy, key kind, null handling,
+fields — because names are resolved when the converter is built rather than when it is generated.
+Errors match too, down to the message.
+
+Diagnostics are compile-time where they can be: `BS1001` (context is not `partial`), `BS1002` (does
+not derive from `ErlSerializerContext`), `BS1003` (no constructor the deserializer could use),
+`BS1004` (abstract or an interface), `BS1005` (`[ErlRecord]` with inherited members, whose order is
+not guaranteed to match).
 
 ## Security
 
@@ -268,17 +306,21 @@ src/BeamSharp/
   Networking/  host name resolution
 src/BeamSharp.Serialization/
   Converters/  built-ins, collections, and the reflection fallback for plain objects
+src/BeamSharp.Serialization.Generator/
+               the Roslyn generator, shipped inside the serialization package as an analyzer
 samples/
   BeamSharp.Server   a .NET node for Elixir to call into
   BeamSharp.Client   a .NET node that calls into Elixir
 test/
   BeamSharp.Tests               unit tests over the codec and protocol
-  BeamSharp.Serialization.Tests unit tests over the object mapping
+  BeamSharp.Serialization.Tests unit tests over the object mapping and the generator
+  BeamSharp.Aot.Probe            a NativeAOT console app proving the generated path needs no reflection
   gen_fixtures.escript          regenerates fixtures.txt from a real Erlang runtime
   elixir_client.exs             34 checks driving the .NET node from Elixir
   elixir_structs.exs            the Elixir structs the C# records map onto
   elixir_server.exs             a plain Elixir GenServer for the .NET node to call
   run_integration.sh            runs both directions end to end
+  run_aot_probe.sh              publishes and runs the AOT probe
 ```
 
 ## Testing
@@ -287,7 +329,7 @@ test/
 dotnet test
 ```
 
-139 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
+160 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
 (`test/fixtures.txt`, regenerated by `test/gen_fixtures.escript`) rather than against our own
 encoder, so a shared misunderstanding of the format cannot pass.
 
@@ -297,8 +339,14 @@ test/run_integration.sh
 
 Starts the C# node and an Elixir node and runs 34 checks inbound and 11 outbound, covering calls,
 casts, sends, monitors, links, exits, rpc, error propagation, concurrency, and C# objects arriving
-as Elixir structs. Needs `elixir` and
-`epmd` on `PATH`.
+as Elixir structs. Needs `elixir` and `epmd` on `PATH`.
+
+```bash
+test/run_aot_probe.sh
+```
+
+Publishes a console app with `PublishAot=true`, fails if the publish emits a single trim or AOT
+warning, and runs the resulting native binary.
 
 ## Protocol references
 

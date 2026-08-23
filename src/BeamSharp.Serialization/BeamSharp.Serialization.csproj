@@ -9,6 +9,7 @@
     <RootNamespace>BeamSharp.Serialization</RootNamespace>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
 
   <PropertyGroup Label="Package">
@@ -40,6 +41,14 @@
 
   <ItemGroup>
     <ProjectReference Include="../BeamSharp/BeamSharp.csproj" />
+  </ItemGroup>
+
+  <!-- The generator ships inside this package as an analyzer, the way System.Text.Json does. -->
+  <ItemGroup>
+    <ProjectReference Include="../BeamSharp.Serialization.Generator/BeamSharp.Serialization.Generator.csproj"
+                      PrivateAssets="all" ReferenceOutputAssembly="false" />
+    <None Include="../BeamSharp.Serialization.Generator/bin/$(Configuration)/netstandard2.0/BeamSharp.Serialization.Generator.dll"
+          Pack="true" PackagePath="analyzers/dotnet/cs" Visible="false" />
   </ItemGroup>
 
   <ItemGroup>

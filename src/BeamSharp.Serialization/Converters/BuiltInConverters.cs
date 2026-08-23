@@ -89,6 +89,10 @@ internal sealed class TermPassthroughFactory : ErlConverterFactory
 
     public override bool CanConvert(Type type) => typeof(ErlTerm).IsAssignableFrom(type);
 
+        [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026",
+        Justification = Justifications.ReflectionFallback)]
+    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("AOT", "IL3050",
+        Justification = Justifications.ReflectionFallback)]
     public override ErlConverter CreateConverter(Type type, ErlSerializerOptions options) =>
         (ErlConverter)Activator.CreateInstance(typeof(PassthroughConverter<>).MakeGenericType(type))!;
 
