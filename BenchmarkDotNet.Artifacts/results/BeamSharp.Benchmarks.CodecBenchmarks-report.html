@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8' />
+<title>BeamSharp.Benchmarks.CodecBenchmarks-20260823-150428</title>
+
+<style type="text/css">
+	table { border-collapse: collapse; display: block; width: 100%; overflow: auto; }
+	td, th { padding: 6px 13px; border: 1px solid #ddd; text-align: right; }
+	tr { background-color: #fff; border-top: 1px solid #ccc; }
+	tr:nth-child(even) { background: #f8f8f8; }
+</style>
+</head>
+<body>
+<pre><code>
+BenchmarkDotNet v0.14.0, macOS 26.5.2 (25F84) [Darwin 25.5.0]
+Apple M1 Pro, 1 CPU, 10 logical and 10 physical cores
+.NET SDK 10.0.302
+  [Host]   : .NET 10.0.10 (10.0.1026.32716), Arm64 RyuJIT AdvSIMD
+  ShortRun : .NET 10.0.10 (10.0.1026.32716), Arm64 RyuJIT AdvSIMD
+</code></pre>
+<pre><code>Job=ShortRun  IterationCount=3  LaunchCount=1  
+WarmupCount=3  
+</code></pre>
+
+<table>
+<thead><tr><th>Method        </th><th>Mean </th><th>Gen0</th><th>Gen1</th><th>Allocated</th>
+</tr>
+</thead><tbody><tr><td>Encode_GenServerCall</td><td>128.8 ns</td><td>0.0701</td><td>-</td><td>440 B</td>
+</tr><tr><td>Decode_GenServerCall</td><td>233.2 ns</td><td>0.1287</td><td>0.0002</td><td>808 B</td>
+</tr><tr><td>Encode_200Maps</td><td>24,240.5 ns</td><td>8.6975</td><td>0.5798</td><td>54840 B</td>
+</tr><tr><td>Decode_200Maps</td><td>53,900.1 ns</td><td>26.7334</td><td>8.6060</td><td>168080 B</td>
+</tr></tbody></table>
+</body>
+</html>

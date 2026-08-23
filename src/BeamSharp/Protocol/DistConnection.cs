@@ -224,9 +224,14 @@ public sealed class DistConnection : IAsyncDisposable
         Closed?.Invoke(this, error);
     }
 
+    private int _disposed;
+
+    /// <summary>Closes the connection. Safe to call more than once.</summary>
     public ValueTask DisposeAsync()
     {
         CloseInternal(null);
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return ValueTask.CompletedTask;
+
         _cts.Dispose();
         _client.Dispose();
         return ValueTask.CompletedTask;

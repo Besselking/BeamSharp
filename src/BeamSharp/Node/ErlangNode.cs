@@ -30,6 +30,7 @@ public sealed class ErlangNode : IAsyncDisposable
     private readonly List<Task> _hostedServers = [];
 
     private TcpListener? _listener;
+    private int _disposed;
     private uint _pidId;
     private uint _pidSerial;
     private long _refCounter;
@@ -728,8 +729,11 @@ public sealed class ErlangNode : IAsyncDisposable
 
     private void Log(string message) => _options.Log?.Invoke(message);
 
+    /// <summary>Stops the node. Safe to call more than once, as the dispose contract requires.</summary>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
         await _cts.CancelAsync().ConfigureAwait(false);
         _listener?.Stop();
 

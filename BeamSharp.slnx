@@ -1,16 +1,21 @@
 <Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/BeamSharp.Benchmarks/BeamSharp.Benchmarks.csproj" />
+  </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/BeamSharp.Client/BeamSharp.Client.csproj" />
     <Project Path="samples/BeamSharp.Server/BeamSharp.Server.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/BeamSharp/BeamSharp.csproj" />
+    <Project Path="src/BeamSharp.Extensions.Hosting/BeamSharp.Extensions.Hosting.csproj" />
     <Project Path="src/BeamSharp.Serialization/BeamSharp.Serialization.csproj" />
     <Project Path="src/BeamSharp.Serialization.Generator/BeamSharp.Serialization.Generator.csproj" />
     <Project Path="src/BeamSharp.Serialization.Reflection/BeamSharp.Serialization.Reflection.csproj" />
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/BeamSharp.Aot.Probe/BeamSharp.Aot.Probe.csproj" />
+    <Project Path="test/BeamSharp.Extensions.Hosting.Tests/BeamSharp.Extensions.Hosting.Tests.csproj" />
     <Project Path="test/BeamSharp.Serialization.Tests/BeamSharp.Serialization.Tests.csproj" />
     <Project Path="test/BeamSharp.Tests/BeamSharp.Tests.csproj" />
   </Folder>
