@@ -134,6 +134,85 @@ maps require, since any term can be a key.
   and later, so one handler serves both, and exceptions surface on the caller's side the way a
   raising Erlang function would.
 
+## Serializing C# objects
+
+`BeamSharp.Serialization` is a separate package, so the core stays free of reflection. It maps plain
+C# objects onto terms, and the default shape is chosen to look native on the far side: a type
+becomes a map with snake_case atom keys.
+
+```csharp
+record Person(string FirstName, int Age);
+
+ErlSerializer.Serialize(new Person("Ada", 36));   // %{first_name: "Ada", age: 36}
+```
+
+Add one attribute and it stops being a map that resembles a struct, and becomes one:
+
+```csharp
+[ErlStruct("BeamSharp.Person")]
+record Person(string FirstName, int Age, string? Email = null, Status Status = Status.Active);
+```
+
+```elixir
+{:ok, person} = GenServer.call({:directory, :"csharp@myhost"}, {:find, "ada"})
+#=> {:ok, %BeamSharp.Person{first_name: "Ada", age: 36, email: "ada@example.com", status: :active}}
+
+%BeamSharp.Person{first_name: name} = person     # patterns work, because it really is a struct
+```
+
+An Elixir struct is a map carrying `__struct__`, so writing that key is all it takes. The interop
+suite asserts this against a live Elixir node rather than against our own reader.
+
+| C# | Erlang / Elixir |
+| --- | --- |
+| `record` / `class` | map with snake_case atom keys |
+| `[ErlStruct("MyApp.X")]` | `%MyApp.X{}` |
+| `[ErlRecord("point")]` | `{point, 3, 4}` — an Erlang record |
+| `enum Status.InProgress` | `:in_progress` |
+| `null` | `nil` (or `:undefined`) |
+| `string` | binary; `[ErlAsAtom]` for an atom |
+| `byte[]` | binary, not a list of integers |
+| `List<T>`, `T[]` | list |
+| `Dictionary<K,V>` | map |
+| `(int, string)` | `{1, "two"}` |
+| `DateTime`, `Guid` | ISO 8601 / UUID binary |
+| `TimeSpan` | integer microseconds |
+
+Naming, key kind, null representation and the rest are configurable through `ErlSerializerOptions`.
+`[ErlProperty]`, `[ErlIgnore]`, `[ErlConvert]` and `[ErlAsAtom]` cover the per-member cases.
+
+### Extending it, and the road to AOT
+
+There is exactly one extension point, `ErlConverter<T>`:
+
+```csharp
+sealed class MoneyConverter : ErlConverter<Money>
+{
+    public override ErlTerm Write(Money v, ErlSerializerOptions o) =>
+        Erl.Tuple(Erl.Atom("money"), Erl.Int((long)(v.Amount * 100)), Erl.Atom(v.Currency));
+
+    public override Money Read(ErlTerm t, ErlSerializerOptions o) => /* ... */;
+}
+
+options.Converters.Add(new MoneyConverter());
+```
+
+Built-in conversions, the reflection fallback for plain objects, and anything a source generator
+emits are all the same kind of thing. That is deliberate: generated converters do not need a second
+API to slot into, they just get registered ahead of the reflection fallback.
+
+Reflection is therefore a replaceable default rather than a requirement. Set
+`UseReflection = false` and any type without a registered converter fails at the call site with a
+message naming it, instead of silently depending on metadata a trimmer may have dropped:
+
+```csharp
+var options = new ErlSerializerOptions { UseReflection = false };
+options.Converters.Add(new PersonConverter());   // hand-written today, generated later
+```
+
+The reflection implementation reads members through `PropertyInfo`, which is fine for message-rate
+work and is the part a source generator would make fast as well as AOT-safe.
+
 ## Security
 
 Erlang distribution authenticates with a shared secret — the cookie — over an MD5 challenge, and
@@ -187,15 +266,19 @@ src/BeamSharp/
   Protocol/    flags, opcodes, handshake, framed connection
   Node/        node, mailboxes, gen_server and rpc dispatch
   Networking/  host name resolution
+src/BeamSharp.Serialization/
+  Converters/  built-ins, collections, and the reflection fallback for plain objects
 samples/
   BeamSharp.Server   a .NET node for Elixir to call into
   BeamSharp.Client   a .NET node that calls into Elixir
 test/
-  BeamSharp.Tests         unit tests over the codec and protocol
-  gen_fixtures.escript    regenerates fixtures.txt from a real Erlang runtime
-  elixir_client.exs       26 checks driving the .NET node from Elixir
-  elixir_server.exs       a plain Elixir GenServer for the .NET node to call
-  run_integration.sh      runs both directions end to end
+  BeamSharp.Tests               unit tests over the codec and protocol
+  BeamSharp.Serialization.Tests unit tests over the object mapping
+  gen_fixtures.escript          regenerates fixtures.txt from a real Erlang runtime
+  elixir_client.exs             34 checks driving the .NET node from Elixir
+  elixir_structs.exs            the Elixir structs the C# records map onto
+  elixir_server.exs             a plain Elixir GenServer for the .NET node to call
+  run_integration.sh            runs both directions end to end
 ```
 
 ## Testing
@@ -204,7 +287,7 @@ test/
 dotnet test
 ```
 
-73 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
+139 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
 (`test/fixtures.txt`, regenerated by `test/gen_fixtures.escript`) rather than against our own
 encoder, so a shared misunderstanding of the format cannot pass.
 
@@ -212,8 +295,9 @@ encoder, so a shared misunderstanding of the format cannot pass.
 test/run_integration.sh
 ```
 
-Starts the C# node and an Elixir node and runs 26 checks inbound and 11 outbound, covering calls,
-casts, sends, monitors, links, exits, rpc, error propagation and concurrency. Needs `elixir` and
+Starts the C# node and an Elixir node and runs 34 checks inbound and 11 outbound, covering calls,
+casts, sends, monitors, links, exits, rpc, error propagation, concurrency, and C# objects arriving
+as Elixir structs. Needs `elixir` and
 `epmd` on `PATH`.
 
 ## Protocol references

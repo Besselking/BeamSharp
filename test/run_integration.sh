@@ -39,7 +39,7 @@ done
 status=0
 
 echo "=== inbound: Elixir -> C# ==="
-elixir --sname tester --cookie "$COOKIE" test/elixir_client.exs || status=1
+elixir --sname tester --cookie "$COOKIE" -r test/elixir_structs.exs test/elixir_client.exs || status=1
 
 echo
 echo "=== outbound: C# -> Elixir ==="

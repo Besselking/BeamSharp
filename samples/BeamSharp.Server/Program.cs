@@ -1,5 +1,6 @@
 using BeamSharp.Epmd;
 using BeamSharp.Node;
+using BeamSharp.Serialization;
 using BeamSharp.Terms;
 
 // A C# node that an Elixir peer can talk to as if it were just another BEAM node.
@@ -24,6 +25,10 @@ node.NodeDown += (peer, error) => Console.WriteLine($"<-- {peer} disconnected ({
 
 // A GenServer. From Elixir: GenServer.call({:calculator, :"csharp@host"}, {:add, 1, 2})
 node.RegisterGenServer("calculator", new Calculator(node));
+
+// Plain C# objects, mapped to and from terms. From Elixir these arrive as real %BeamSharp.Person{}
+// structs, so the caller cannot tell they were built by a .NET process.
+node.RegisterGenServer("directory", new Directory());
 
 // A plain mailbox, the equivalent of a spawned process that just receives.
 var printer = node.CreateMailbox("printer");
@@ -141,4 +146,64 @@ internal sealed class Calculator(ErlangNode node) : ErlangGenServer
         Console.WriteLine($"calculator info: {message.Term}");
         return ValueTask.CompletedTask;
     }
+}
+
+
+/// <summary>A C# record that Elixir sees as <c>%BeamSharp.Person{}</c>.</summary>
+[ErlStruct("BeamSharp.Person")]
+internal record Person(string FirstName, int Age, string? Email = null, Status Status = Status.Active);
+
+internal enum Status
+{
+    Active,
+    OnLeave
+}
+
+/// <summary>Serves objects rather than hand-built terms.</summary>
+internal sealed class Directory : ErlangGenServer
+{
+    private static readonly Person[] People =
+    [
+        new("Ada", 36, "ada@example.com"),
+        new("Grace", 45, Status: Status.OnLeave),
+        new("Alan", 41, "alan@example.com")
+    ];
+
+    public override ValueTask<ErlTerm?> HandleCallAsync(ErlTerm request, GenCallFrom from, CancellationToken ct)
+    {
+        switch (request)
+        {
+            case ErlAtom { Name: "all" }:
+                return Reply(ErlSerializer.Serialize(People));
+
+            case ErlTuple { Arity: 2 } t when t[0].IsAtom("find"):
+            {
+                var name = t[1].AsText();
+                var match = People.FirstOrDefault(p =>
+                    string.Equals(p.FirstName, name, StringComparison.OrdinalIgnoreCase));
+
+                return Reply(match is null
+                    ? ErlSerializer.Serialize((Erl.Atom("error"), Erl.Atom("not_found")))
+                    : ErlSerializer.Serialize((Erl.Atom("ok"), match)));
+            }
+
+            case ErlTuple { Arity: 2 } t when t[0].IsAtom("echo"):
+            {
+                // Round trip through a real C# object rather than echoing the term back.
+                var person = ErlSerializer.Deserialize<Person>(t[1]);
+                return Reply(ErlSerializer.Serialize(person));
+            }
+
+            case ErlTuple { Arity: 2 } t when t[0].IsAtom("birthday"):
+            {
+                var person = ErlSerializer.Deserialize<Person>(t[1]);
+                return Reply(ErlSerializer.Serialize(person with { Age = person.Age + 1 }));
+            }
+
+            default:
+                return Reply(Erl.Tuple(Erl.Error, Erl.Atom("unknown_request")));
+        }
+    }
+
+    private static ValueTask<ErlTerm?> Reply(ErlTerm term) => ValueTask.FromResult<ErlTerm?>(term);
 }
