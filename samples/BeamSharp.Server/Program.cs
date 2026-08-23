@@ -159,6 +159,16 @@ internal enum Status
     OnLeave
 }
 
+/// <summary>
+/// Converters generated at compile time. The sample uses these rather than reflection so the
+/// interop suite exercises the generated path against a real Elixir node.
+/// </summary>
+[ErlSerializable(typeof(Person))]
+[ErlSerializable(typeof(Person[]))]
+[ErlSerializable(typeof((ErlAtom, Person)))]
+[ErlSerializable(typeof((ErlAtom, ErlAtom)))]
+internal partial class SampleTerms : ErlSerializerContext;
+
 /// <summary>Serves objects rather than hand-built terms.</summary>
 internal sealed class Directory : ErlangGenServer
 {
@@ -174,7 +184,7 @@ internal sealed class Directory : ErlangGenServer
         switch (request)
         {
             case ErlAtom { Name: "all" }:
-                return Reply(ErlSerializer.Serialize(People));
+                return Reply(ErlSerializer.Serialize(People, SampleTerms.Default));
 
             case ErlTuple { Arity: 2 } t when t[0].IsAtom("find"):
             {
@@ -183,21 +193,21 @@ internal sealed class Directory : ErlangGenServer
                     string.Equals(p.FirstName, name, StringComparison.OrdinalIgnoreCase));
 
                 return Reply(match is null
-                    ? ErlSerializer.Serialize((Erl.Atom("error"), Erl.Atom("not_found")))
-                    : ErlSerializer.Serialize((Erl.Atom("ok"), match)));
+                    ? ErlSerializer.Serialize((Erl.Atom("error"), Erl.Atom("not_found")), SampleTerms.Default)
+                    : ErlSerializer.Serialize((Erl.Atom("ok"), match), SampleTerms.Default));
             }
 
             case ErlTuple { Arity: 2 } t when t[0].IsAtom("echo"):
             {
                 // Round trip through a real C# object rather than echoing the term back.
-                var person = ErlSerializer.Deserialize<Person>(t[1]);
-                return Reply(ErlSerializer.Serialize(person));
+                var person = ErlSerializer.Deserialize<Person>(t[1], SampleTerms.Default);
+                return Reply(ErlSerializer.Serialize(person, SampleTerms.Default));
             }
 
             case ErlTuple { Arity: 2 } t when t[0].IsAtom("birthday"):
             {
-                var person = ErlSerializer.Deserialize<Person>(t[1]);
-                return Reply(ErlSerializer.Serialize(person with { Age = person.Age + 1 }));
+                var person = ErlSerializer.Deserialize<Person>(t[1], SampleTerms.Default);
+                return Reply(ErlSerializer.Serialize(person with { Age = person.Age + 1 }, SampleTerms.Default));
             }
 
             default:

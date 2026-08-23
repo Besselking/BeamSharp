@@ -111,6 +111,12 @@ internal static class Emitter
             case AuxiliaryKind.Nullable:
                 return $"new {C}ErlNullableConverter<{aux.Arg1}>(options)";
 
+            case AuxiliaryKind.Tuple:
+                return $"new {C}ErlTupleConverter<{aux.TypeName}>()";
+
+            case AuxiliaryKind.Custom:
+                return $"new {aux.Arg1}()";
+
             case AuxiliaryKind.Enum:
             {
                 var tuple = $"global::System.ValueTuple<{aux.TypeName}, string, string?>";

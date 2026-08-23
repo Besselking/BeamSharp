@@ -21,12 +21,57 @@ internal sealed class AuxiliaryCollector(HashSet<string> declaredTypeNames)
 
     public ImmutableArray<AuxiliaryModel> Collected => _found.Values.ToImmutableArray();
 
+    /// <summary>
+    /// Records a declared type that carries [ErlConvert]. <see cref="Collect"/> skips declared types
+    /// by design, so this is the way in for one that still needs an entry.
+    /// </summary>
+    public void CollectCustom(ITypeSymbol type, string converterTypeName)
+    {
+        var name = Name(type);
+        _found[name] = new AuxiliaryModel(
+            AuxiliaryKind.Custom, name, converterTypeName, null, EquatableArray<EnumMemberModel>.Empty);
+    }
+
+    /// <summary>
+    /// Records a declared type that is itself one of the generic families, bypassing the
+    /// declared-type check that <see cref="Collect"/> applies. Returns false for a plain object,
+    /// which still needs a full generated converter.
+    /// </summary>
+    public bool CollectDeclared(ITypeSymbol type)
+    {
+        if (type.TypeKind != TypeKind.Enum && !IsTuple(type) &&
+            type.OriginalDefinition.SpecialType != SpecialType.System_Nullable_T &&
+            DictionaryTypes(type).Item1 is null && ElementType(type) is null)
+            return false;
+
+        declaredTypeNames.Remove(Name(type));
+        Collect(type);
+        return true;
+    }
+
     public void Collect(ITypeSymbol type)
     {
         var name = Name(type);
 
         if (_found.ContainsKey(name) || declaredTypeNames.Contains(name)) return;
         if (IsBuiltIn(type)) return;
+
+        // A type with its own converter: instantiate exactly that, rather than reaching it through
+        // the reflective attribute factory, which does not exist in an AOT build.
+        if (CustomConverter(type) is { } converter)
+        {
+            _found[name] = new AuxiliaryModel(
+                AuxiliaryKind.Custom, name, converter, null, EquatableArray<EnumMemberModel>.Empty);
+            return;
+        }
+
+        if (IsTuple(type))
+        {
+            _found[name] = new AuxiliaryModel(
+                AuxiliaryKind.Tuple, name, name, null, EquatableArray<EnumMemberModel>.Empty);
+            foreach (var field in ((INamedTypeSymbol)type).TupleElements) Collect(field.Type);
+            return;
+        }
 
         if (type.TypeKind == TypeKind.Enum)
         {
@@ -62,6 +107,18 @@ internal sealed class AuxiliaryCollector(HashSet<string> declaredTypeNames)
 
         // Anything else is either declared, or will fail at the call site with a message naming it.
     }
+
+    /// <summary>The converter named by [ErlConvert] on the type, if there is one.</summary>
+    internal static string? CustomConverter(ITypeSymbol type) =>
+        (type.GetAttributes()
+            .FirstOrDefault(a => a.AttributeClass?.ToDisplayString() ==
+                                 "BeamSharp.Serialization.ErlConvertAttribute")
+            ?.ConstructorArguments[0].Value as INamedTypeSymbol)
+        ?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+    // Roslyn renders a C# tuple as "(T1, T2)" rather than "System.ValueTuple<T1, T2>", so ask the
+    // symbol rather than matching on the display string.
+    private static bool IsTuple(ITypeSymbol type) => type is INamedTypeSymbol { IsTupleType: true };
 
     private static EquatableArray<EnumMemberModel> EnumMembers(ITypeSymbol type)
     {

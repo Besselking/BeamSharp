@@ -13,11 +13,33 @@ internal static class TypeModelBuilder
 {
     private const string Ns = "BeamSharp.Serialization.";
 
-    public static TypeModel? Build(INamedTypeSymbol type, ImmutableArray<DiagnosticInfo>.Builder diagnostics,
+    public static TypeModel? Build(ITypeSymbol type, ImmutableArray<DiagnosticInfo>.Builder diagnostics,
         AuxiliaryCollector auxiliaries)
     {
-        // A type with its own converter is handled by the attribute factory; nothing to generate.
-        if (FindAttribute(type, "ErlConvertAttribute") is not null) return null;
+        // An array is an IArrayTypeSymbol rather than an INamedTypeSymbol, so this has to come
+        // before anything that assumes a named type — declaring Person[] used to be dropped here.
+        if (auxiliaries.CollectDeclared(type)) return null;
+
+        if (type is not INamedTypeSymbol named)
+        {
+            diagnostics.Add(DiagnosticInfo.Create(Diagnostics.UnsupportedType, type,
+                type.ToDisplayString(), "it is not a type a converter can be generated for"));
+            return null;
+        }
+
+        return BuildNamed(named, diagnostics, auxiliaries);
+    }
+
+    private static TypeModel? BuildNamed(INamedTypeSymbol type, ImmutableArray<DiagnosticInfo>.Builder diagnostics,
+        AuxiliaryCollector auxiliaries)
+    {
+        // A type with its own converter is registered as that converter directly.
+        if (FindAttribute(type, "ErlConvertAttribute") is { } own)
+        {
+            if (own.ConstructorArguments[0].Value is INamedTypeSymbol converter)
+                auxiliaries.CollectCustom(type, converter.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+            return null;
+        }
 
         if (type.IsAbstract || type.TypeKind == TypeKind.Interface)
         {

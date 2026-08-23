@@ -10,7 +10,7 @@ namespace BeamSharp.Serialization.Tests;
 /// </summary>
 public class GeneratorEquivalenceTests
 {
-    private static readonly ErlSerializerOptions Reflected = new();
+    private static readonly ErlSerializerOptions Reflected = ErlReflection.Default;
 
     private static void AssertSame<T>(T value, ErlSerializerOptions? reflected = null,
         ErlSerializerContext? generated = null)
@@ -93,7 +93,7 @@ public class GeneratorEquivalenceTests
     [InlineData(ErlMapKeyKind.Atom)]
     public void Key_kind_is_honoured_identically(ErlMapKeyKind kind)
     {
-        var reflected = new ErlSerializerOptions { MapKeyKind = kind };
+        var reflected = new ErlSerializerOptions { MapKeyKind = kind }.AddReflectionFallback();
         AssertSame(new Person("Ada", 36), reflected, new TestContext(reflected));
     }
 
@@ -102,31 +102,31 @@ public class GeneratorEquivalenceTests
     {
         // Names are resolved when the converter is built, not when it is generated, which is what
         // keeps a compile-time converter responsive to a runtime setting.
-        var reflected = new ErlSerializerOptions { PropertyNamingPolicy = ErlNamingPolicy.Unchanged };
+        var reflected = new ErlSerializerOptions { PropertyNamingPolicy = ErlNamingPolicy.Unchanged }.AddReflectionFallback();
         AssertSame(new Annotated { Level = "info" }, reflected, new TestContext(reflected));
 
-        var camel = new ErlSerializerOptions { PropertyNamingPolicy = ErlNamingPolicy.CamelCase };
+        var camel = new ErlSerializerOptions { PropertyNamingPolicy = ErlNamingPolicy.CamelCase }.AddReflectionFallback();
         AssertSame(new Person("Ada", 36), camel, new TestContext(camel));
     }
 
     [Fact]
     public void Ignoring_nulls_is_honoured_identically()
     {
-        var reflected = new ErlSerializerOptions { IgnoreNullValues = true };
+        var reflected = new ErlSerializerOptions { IgnoreNullValues = true }.AddReflectionFallback();
         AssertSame(new ElixirPerson("Ada", 36), reflected, new TestContext(reflected));
     }
 
     [Fact]
     public void Undefined_instead_of_nil_is_honoured_identically()
     {
-        var reflected = new ErlSerializerOptions { NullValue = ErlNullValue.Undefined };
+        var reflected = new ErlSerializerOptions { NullValue = ErlNullValue.Undefined }.AddReflectionFallback();
         AssertSame(new ElixirPerson("Ada", 36), reflected, new TestContext(reflected));
     }
 
     [Fact]
     public void Including_fields_is_honoured_identically()
     {
-        var reflected = new ErlSerializerOptions { IncludeFields = true };
+        var reflected = new ErlSerializerOptions { IncludeFields = true }.AddReflectionFallback();
         AssertSame(new WithFields { Included = 7, Name = "x" }, reflected, new TestContext(reflected));
     }
 
@@ -176,10 +176,14 @@ public class GeneratorEquivalenceTests
 public class GeneratedContextTests
 {
     [Fact]
-    public void A_context_switches_reflection_off()
+    public void A_context_adds_no_reflection_of_its_own()
     {
-        Assert.False(TestContext.Default.Options.UseReflection);
+        // Nothing to switch off any more: the reflection fallback is a separate package, and a
+        // context simply does not reference it.
         Assert.True(TestContext.Default.Options.IsReadOnly);
+        Assert.DoesNotContain(TestContext.Default.Options.ConverterFactories,
+            factory => factory.GetType().Assembly != typeof(ErlSerializer).Assembly
+                       && factory.GetType().Namespace?.EndsWith("Reflection", StringComparison.Ordinal) == true);
     }
 
     [Fact]
@@ -189,16 +193,64 @@ public class GeneratedContextTests
         var ex = Assert.Throws<ErlSerializationException>(() =>
             ErlSerializer.Serialize(new Undeclared("x"), TestContext.Default));
 
-        Assert.Contains("UseReflection is off", ex.Message);
         Assert.Contains(nameof(Undeclared), ex.Message);
+        Assert.Contains("ErlSerializable", ex.Message);
+        Assert.Contains("AddReflectionFallback", ex.Message);
     }
 
     [Fact]
-    public void Built_in_conversions_still_work_without_being_declared()
+    public void Built_in_scalar_conversions_need_no_declaration()
     {
         Assert.Equal(Erl.Int(1), ErlSerializer.Serialize(1, TestContext.Default));
         Assert.Equal(Erl.String("x"), ErlSerializer.Serialize("x", TestContext.Default));
-        Assert.Equal(Erl.List(Erl.Int(1)), ErlSerializer.Serialize(new[] { 1 }, TestContext.Default));
+        Assert.Equal(Erl.Atom("true"), ErlSerializer.Serialize(true, TestContext.Default));
+    }
+
+    [Fact]
+    public void A_collection_reached_from_a_declared_type_is_rooted_by_the_generator()
+    {
+        // Nested declares List<Person>, so its converter instantiation is written out and no
+        // reflective factory is needed for it.
+        var value = new Nested(new Person("Ada", 36), [new Person("Grace", 45)], new Dictionary<string, int>());
+        var back = ErlSerializer.Deserialize<Nested>(
+            ErlSerializer.Serialize(value, TestContext.Default), TestContext.Default);
+
+        Assert.Equal("Grace", back.Friends[0].FirstName);
+    }
+
+    [Fact]
+    public void A_declared_array_gets_a_converter()
+    {
+        // An array is an IArrayTypeSymbol rather than an INamedTypeSymbol, so it was being dropped
+        // from the attribute list without a word. Silence is the part worth a regression test.
+        Person[] people = [new Person("Ada", 36), new Person("Alan", 41)];
+
+        var back = ErlSerializer.Deserialize<Person[]>(
+            ErlSerializer.Serialize(people, TestContext.Default), TestContext.Default);
+
+        Assert.Equal(people, back);
+    }
+
+    [Fact]
+    public void A_declared_enum_and_tuple_get_converters()
+    {
+        Assert.Equal(Erl.Atom("in_progress"), ErlSerializer.Serialize(Status.InProgress, TestContext.Default));
+        Assert.Equal((1, "two"), ErlSerializer.Deserialize<(int, string)>(
+            ErlSerializer.Serialize((1, "two"), TestContext.Default), TestContext.Default));
+    }
+
+    [Fact]
+    public void The_reflection_fallback_can_back_a_context_when_trimming_is_not_a_concern()
+    {
+        // Both together: generated converters are consulted first, reflection catches the rest.
+        var context = new TestContext(new ErlSerializerOptions().AddReflectionFallback());
+
+        Assert.Equal(
+            ErlSerializer.Serialize(new Person("Ada", 36), TestContext.Default),
+            ErlSerializer.Serialize(new Person("Ada", 36), context));
+
+        // Undeclared, so this can only have come from the fallback.
+        Assert.IsType<ErlMap>(ErlSerializer.Serialize(new Undeclared("x"), context));
     }
 
     [Fact]

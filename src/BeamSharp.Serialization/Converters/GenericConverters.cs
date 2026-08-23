@@ -106,15 +106,10 @@ public sealed class ErlEnumConverter<T> : ErlConverter<T> where T : struct, Enum
     private readonly Dictionary<T, string> _toAtom = new();
     private readonly Dictionary<string, T> _fromAtom = new(StringComparer.Ordinal);
 
-    /// <summary>Builds the name mapping, honouring the naming policy and any member overrides.</summary>
-    [global::System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage("Trimming", "IL2026",
-        Justification = Justifications.ReflectionFallback)]
-    public ErlEnumConverter(ErlSerializerOptions options)
-    {
-        foreach (var (value, name, explicitName) in Members(options)) Add(value, name, explicitName);
-    }
-
-    /// <summary>Used by generated code, which supplies the members it read at compile time.</summary>
+    /// <summary>
+    /// Builds the name mapping from the members supplied by the caller. Discovering them is the
+    /// caller's job precisely so that this type needs no reflection.
+    /// </summary>
     public ErlEnumConverter(ErlSerializerOptions options, (T Value, string ClrName, string? ExplicitName)[] members)
     {
         foreach (var (value, name, explicitName) in members)
@@ -126,18 +121,6 @@ public sealed class ErlEnumConverter<T> : ErlConverter<T> where T : struct, Enum
         var atom = explicitName ?? name;
         _toAtom.TryAdd(value, atom);
         _fromAtom[atom] = value;
-    }
-
-    [RequiresUnreferencedCode("Reads enum member attributes reflectively; generated code passes them in instead.")]
-    private static IEnumerable<(T, string, string?)> Members(ErlSerializerOptions options)
-    {
-        foreach (var name in Enum.GetNames<T>())
-        {
-            var field = typeof(T).GetField(name)!;
-            var explicitName = field.GetCustomAttributes(typeof(ErlPropertyAttribute), false)
-                .Cast<ErlPropertyAttribute>().FirstOrDefault()?.Name;
-            yield return (Enum.Parse<T>(name), options.EnumNamingPolicy.ConvertName(name), explicitName);
-        }
     }
 
     public override ErlTerm Write(T value, ErlSerializerOptions options) =>
@@ -160,5 +143,43 @@ public sealed class ErlEnumConverter<T> : ErlConverter<T> where T : struct, Enum
             default:
                 throw TermRead.Mismatch(term, $"an atom naming a {typeof(T).Name}");
         }
+    }
+}
+
+/// <summary>
+/// Converts a C# tuple to and from an Erlang tuple.
+/// <para>
+/// The annotation on <typeparamref name="TTuple"/> is what keeps this trim-safe: it tells the
+/// trimmer to preserve the constructor that <see cref="Activator"/> reaches for, so no dynamic code
+/// is involved and a rooted instantiation works under AOT.
+/// </para>
+/// </summary>
+public sealed class ErlTupleConverter<
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TTuple>
+    : ErlConverter<TTuple>
+    where TTuple : System.Runtime.CompilerServices.ITuple
+{
+    private static readonly Type[] Elements = typeof(TTuple).GetGenericArguments();
+
+    public override ErlTerm Write(TTuple value, ErlSerializerOptions options)
+    {
+        if (value is null) return options.NullAtom;
+
+        var items = new ErlTerm[value.Length];
+        for (var i = 0; i < value.Length; i++)
+            items[i] = ValueHelper.Write(value[i], Elements[i], options);
+        return new ErlTuple(items);
+    }
+
+    public override TTuple Read(ErlTerm term, ErlSerializerOptions options)
+    {
+        if (term is not ErlTuple tuple || tuple.Arity != Elements.Length)
+            throw TermRead.Mismatch(term, $"a tuple of {Elements.Length} elements");
+
+        var args = new object?[Elements.Length];
+        for (var i = 0; i < args.Length; i++)
+            args[i] = ValueHelper.Read(tuple[i], Elements[i], options);
+
+        return (TTuple)Activator.CreateInstance(typeof(TTuple), args)!;
     }
 }

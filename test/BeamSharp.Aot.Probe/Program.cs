@@ -3,7 +3,11 @@ using BeamSharp.Terms;
 
 // Published with PublishAot=true. Everything here has to work with no runtime code generation and
 // no metadata the trimmer could have removed, so a green run is the actual evidence that the
-// generated path is AOT-safe. Reflection is off, so an undeclared type fails loudly.
+// generated path is AOT-safe.
+//
+// This project does not reference BeamSharp.Serialization.Reflection at all, which is what makes
+// the evidence airtight: there is no reflection fallback present to quietly take over, so an
+// undeclared type can only fail.
 
 var failures = 0;
 
@@ -81,6 +85,13 @@ Check("the whole thing survives the external term format", () =>
     return ErlSerializer.Deserialize<Person>(TermDecoder.Decode(encoded), context) == new Person("Ada", 36);
 });
 
+Check("a bare collection declared at the top level round trips", () =>
+{
+    List<Person> people = [new Person("Ada", 36), new Person("Alan", 41)];
+    var back = ErlSerializer.Deserialize<List<Person>>(ErlSerializer.Serialize(people, context), context);
+    return back.Count == 2 && back[0].FirstName == "Ada";
+});
+
 Check("an undeclared type fails at the call site", () =>
 {
     try
@@ -90,7 +101,7 @@ Check("an undeclared type fails at the call site", () =>
     }
     catch (ErlSerializationException ex)
     {
-        return ex.Message.Contains("UseReflection is off");
+        return ex.Message.Contains("AddReflectionFallback") && ex.Message.Contains("Undeclared");
     }
 });
 
@@ -121,4 +132,6 @@ internal record Undeclared(string Name);
 [ErlSerializable(typeof(Team))]
 [ErlSerializable(typeof(Measurement))]
 [ErlSerializable(typeof(Readings))]
+[ErlSerializable(typeof(List<Person>))]
+[ErlSerializable(typeof(Role))]
 internal partial class AotContext : ErlSerializerContext;

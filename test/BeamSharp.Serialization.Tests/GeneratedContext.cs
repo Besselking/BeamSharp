@@ -14,6 +14,9 @@ namespace BeamSharp.Serialization.Tests;
 [ErlSerializable(typeof(Money))]
 [ErlSerializable(typeof(Temperature))]
 [ErlSerializable(typeof(DuplicateNames))]
+[ErlSerializable(typeof(Person[]))]
+[ErlSerializable(typeof(Status))]
+[ErlSerializable(typeof((int, string)))]
 internal partial class TestContext : ErlSerializerContext
 {
     public TestContext() { }

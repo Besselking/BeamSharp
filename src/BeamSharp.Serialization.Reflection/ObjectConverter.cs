@@ -1,14 +1,16 @@
 using System.Reflection;
 using BeamSharp.Terms;
 
-namespace BeamSharp.Serialization.Converters;
+using BeamSharp.Serialization.Converters;
+
+namespace BeamSharp.Serialization.Reflection;
 
 /// <summary>
 /// The reflection fallback for plain objects: the catch-all consulted when nothing else claims a
 /// type. A source generator would replace this by registering generated converters ahead of it,
 /// which is why the shape it produces is defined by the attributes rather than by reflection itself.
 /// </summary>
-internal sealed class ObjectConverterFactory : ErlConverterFactory
+public sealed class ObjectConverterFactory : ErlConverterFactory
 {
     public static readonly ObjectConverterFactory Instance = new();
 

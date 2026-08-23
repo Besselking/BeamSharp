@@ -1,6 +1,8 @@
 using System.Reflection;
 
-namespace BeamSharp.Serialization.Converters;
+using BeamSharp.Serialization.Converters;
+
+namespace BeamSharp.Serialization.Reflection;
 
 /// <summary>
 /// Builds converters reflectively. Activator wraps anything a constructor throws in a

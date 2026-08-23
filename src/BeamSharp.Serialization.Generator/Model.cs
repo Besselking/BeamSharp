@@ -55,7 +55,11 @@ internal enum AuxiliaryKind
     Enum,
     Nullable,
     Collection,
-    Dictionary
+    Dictionary,
+    Tuple,
+
+    /// <summary>A type carrying [ErlConvert]; the named converter is instantiated directly.</summary>
+    Custom
 }
 
 /// <summary>One enum member and the atom it maps to.</summary>

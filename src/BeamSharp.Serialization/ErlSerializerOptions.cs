@@ -36,7 +36,6 @@ public sealed class ErlSerializerOptions
     private ErlNullValue _nullValue = ErlNullValue.Nil;
     private bool _ignoreNullValues;
     private bool _includeFields;
-    private bool _useReflection = true;
 
     /// <summary>The default options: snake_case names, atom keys, <c>nil</c> for null.</summary>
     public static ErlSerializerOptions Default { get; } = CreateDefault();
@@ -59,7 +58,6 @@ public sealed class ErlSerializerOptions
         _nullValue = source._nullValue;
         _ignoreNullValues = source._ignoreNullValues;
         _includeFields = source._includeFields;
-        _useReflection = source._useReflection;
         Converters = [.. source.Converters];
         ConverterFactories = [.. source.ConverterFactories];
     }
@@ -112,16 +110,6 @@ public sealed class ErlSerializerOptions
         set => Set(ref _includeFields, value);
     }
 
-    /// <summary>
-    /// Whether plain objects may be handled by reflection. Set this to false under NativeAOT or
-    /// trimming: any type without a registered converter then fails loudly at the call site instead
-    /// of silently depending on metadata the trimmer may have removed.
-    /// </summary>
-    public bool UseReflection
-    {
-        get => _useReflection;
-        set => Set(ref _useReflection, value);
-    }
 
     /// <summary>The atom this configuration uses for null.</summary>
     public ErlAtom NullAtom => _nullValue == ErlNullValue.Nil ? ErlAtom.Nil : ErlAtom.Undefined;
@@ -153,29 +141,35 @@ public sealed class ErlSerializerOptions
 
     private ErlConverter CreateConverter(Type type)
     {
+        // Exact registrations win, then the built-in scalars, then anything a factory claims. The
+        // ordering matters because the reflection fallback's factory claims every type, so it has to
+        // be reached last.
         foreach (var converter in Converters)
             if (converter.HandledType == type)
                 return converter;
+
+        if (BuiltInConverters.TryGet(type, out var builtIn))
+            return builtIn;
 
         foreach (var factory in ConverterFactories)
             if (factory.CanConvert(type))
                 return factory.CreateConverter(type, this);
 
-        if (AttributeConverterFactory.Instance.CanConvert(type))
-            return AttributeConverterFactory.Instance.CreateConverter(type, this);
+        throw new ErlSerializationException(
+            $"no converter is registered for {type}. Either declare it on a generated " +
+            $"ErlSerializerContext with [ErlSerializable(typeof({Friendly(type)}))], or reference the " +
+            $"BeamSharp.Serialization.Reflection package and call options.AddReflectionFallback() " +
+            $"to handle it by reflection.");
+    }
 
-        if (BuiltInConverters.TryGet(type, out var builtIn))
-            return builtIn;
+    /// <summary>Renders <c>HashSet&lt;int&gt;</c> rather than <c>HashSet`1</c> in diagnostics.</summary>
+    private static string Friendly(Type type)
+    {
+        if (!type.IsGenericType) return type.Name;
 
-        foreach (var factory in BuiltInConverters.Factories)
-            if (factory.CanConvert(type))
-                return factory.CreateConverter(type, this);
-
-        if (!_useReflection)
-            throw new ErlSerializationException(
-                $"no converter is registered for {type} and UseReflection is off. Register a " +
-                $"converter for it, or turn reflection back on if you are not targeting AOT.");
-
-        return ObjectConverterFactory.Instance.CreateConverter(type, this);
+        var name = type.Name;
+        var tick = name.IndexOf('`');
+        if (tick >= 0) name = name[..tick];
+        return $"{name}<{string.Join(", ", type.GetGenericArguments().Select(Friendly))}>";
     }
 }

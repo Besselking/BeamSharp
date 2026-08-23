@@ -43,7 +43,7 @@ public sealed class ErlSerializerGenerator : IIncrementalGenerator
 
         var targets = ctx.Attributes
             .Where(a => a.ConstructorArguments.Length == 1)
-            .Select(a => a.ConstructorArguments[0].Value as INamedTypeSymbol)
+            .Select(a => a.ConstructorArguments[0].Value as ITypeSymbol)
             .Where(t => t is not null)
             .Select(t => t!)
             .ToList();

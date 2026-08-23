@@ -25,9 +25,9 @@ public sealed class ErlSerializableAttribute(Type type) : Attribute
 /// var term = ErlSerializer.Serialize(person, AppTerms.Default);
 /// </code>
 /// <para>
-/// The options a context exposes have <see cref="ErlSerializerOptions.UseReflection"/> switched off,
-/// so a type that was never declared fails at the call site naming itself rather than quietly
-/// falling back to reflection over metadata a trimmer may have removed.
+/// A context adds no reflection of its own, so unless the caller went out of its way to add the
+/// fallback, a type that was never declared fails at the call site naming itself rather than quietly
+/// depending on metadata a trimmer may have removed.
 /// </para>
 /// </summary>
 public abstract class ErlSerializerContext
@@ -40,8 +40,8 @@ public abstract class ErlSerializerContext
     protected ErlSerializerContext(ErlSerializerOptions? options = null)
     {
         Options = options is null ? new ErlSerializerOptions() : new ErlSerializerOptions(options);
-        Options.UseReflection = false;
-        Options.ConverterFactories.Add(CreateFactory());
+        // First, so generated converters win over a reflection fallback if the caller added one.
+        Options.ConverterFactories.Insert(0, CreateFactory());
         Options.MakeReadOnly();
     }
 

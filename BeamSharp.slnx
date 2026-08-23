@@ -7,6 +7,7 @@
     <Project Path="src/BeamSharp/BeamSharp.csproj" />
     <Project Path="src/BeamSharp.Serialization/BeamSharp.Serialization.csproj" />
     <Project Path="src/BeamSharp.Serialization.Generator/BeamSharp.Serialization.Generator.csproj" />
+    <Project Path="src/BeamSharp.Serialization.Reflection/BeamSharp.Serialization.Reflection.csproj" />
   </Folder>
   <Folder Name="/test/">
     <Project Path="test/BeamSharp.Aot.Probe/BeamSharp.Aot.Probe.csproj" />

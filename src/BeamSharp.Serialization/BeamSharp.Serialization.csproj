@@ -53,6 +53,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="BeamSharp.Serialization.Tests" />
+    <InternalsVisibleTo Include="BeamSharp.Serialization.Reflection" />
   </ItemGroup>
 
 </Project>
