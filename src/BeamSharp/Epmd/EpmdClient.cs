@@ -206,21 +206,29 @@ public sealed class EpmdClient : IAsyncDisposable
         var stream = client.GetStream();
         await WriteFramedAsync(stream, [NamesReq], token).ConfigureAwait(false);
 
-        using var ms = new MemoryStream();
-        var buffer = new byte[8192];
-        int read;
-        while ((read = await stream.ReadAsync(buffer, token).ConfigureAwait(false)) > 0)
+        // Read straight into the destination and grow it, rather than staging through a second
+        // buffer: one copy fewer, and no synchronous write in the middle of an async loop.
+        var response = new byte[8192];
+        var length = 0;
+
+        while (true)
         {
-            if (ms.Length + read > MaxNamesResponse)
-                throw new EpmdException($"the node list exceeded {MaxNamesResponse:N0} bytes");
-            ms.Write(buffer, 0, read);
+            if (length == response.Length)
+            {
+                if (response.Length >= MaxNamesResponse)
+                    throw new EpmdException($"the node list exceeded {MaxNamesResponse:N0} bytes");
+                Array.Resize(ref response, Math.Min(response.Length * 2, MaxNamesResponse));
+            }
+
+            var read = await stream.ReadAsync(response.AsMemory(length), token).ConfigureAwait(false);
+            if (read == 0) break;
+            length += read;
         }
 
-        var all = ms.ToArray();
-        if (all.Length < 4) return [];
+        if (length < 4) return [];
 
         var results = new List<(string, int)>();
-        foreach (var line in Encoding.UTF8.GetString(all, 4, all.Length - 4).Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var line in Encoding.UTF8.GetString(response, 4, length - 4).Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             // "name <alive> at port 12345"
             var parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
