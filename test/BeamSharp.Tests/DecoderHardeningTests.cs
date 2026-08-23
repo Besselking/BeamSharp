@@ -137,6 +137,89 @@ public class DecoderHardeningTests
     }
 
     [Fact]
+    public void Deeply_nested_terms_are_refused_rather_than_overflowing_the_stack()
+    {
+        // Two bytes a level: {104, 1} is a one-element tuple. Forty kilobytes of them nests twenty
+        // thousand deep, and the decoder walks nesting with the call stack, so before this limit a
+        // 40 KB frame aborted the process. A stack overflow is not catchable — no try/catch helps.
+        var deep = new byte[1 + 20_000 * 2 + 1];
+        deep[0] = 131;
+        for (var i = 0; i < 20_000; i++)
+        {
+            deep[1 + i * 2] = TermTags.SmallTuple;
+            deep[2 + i * 2] = 1;
+        }
+        deep[^1] = TermTags.Nil;
+
+        var ex = Assert.Throws<ErlDecodeException>(() => TermDecoder.Decode(deep));
+        Assert.Contains("nested deeper", ex.Message);
+    }
+
+    [Fact]
+    public void Nesting_up_to_the_limit_still_decodes()
+    {
+        // The limit has to be a limit, not a ceiling that ordinary terms bump into.
+        ErlTerm nested = ErlList.Empty;
+        for (var i = 0; i < TermDecoder.DefaultMaxDepth - 2; i++) nested = new ErlTuple(nested);
+
+        Assert.Equal(nested, TermDecoder.Decode(TermEncoder.Encode(nested)));
+    }
+
+    [Fact]
+    public void Randomly_shaped_terms_round_trip_or_are_refused_cleanly()
+    {
+        // Structure-aware fuzzing, as opposed to the random-bytes kind above. Random bytes almost
+        // never nest — they die at the first tag — which is exactly why they missed the stack
+        // overflow. Generating shapes explores the parts of the decoder that recurse.
+        var rng = new Random(4242);
+
+        for (var i = 0; i < 2_000; i++)
+        {
+            var term = RandomTerm(rng, depth: 0);
+            var bytes = TermEncoder.Encode(term);
+
+            Assert.Equal(term, TermDecoder.Decode(bytes));
+
+            // Now corrupt it and require the one failure mode.
+            var mutated = bytes.ToArray();
+            mutated[rng.Next(1, mutated.Length)] = (byte)rng.Next(256);
+            try
+            {
+                TermDecoder.Decode(mutated);
+            }
+            catch (ErlDecodeException)
+            {
+                // Expected.
+            }
+            catch (Exception ex)
+            {
+                Assert.Fail($"{ex.GetType().Name} escaped for a mutated random term: {ex.Message}");
+            }
+        }
+    }
+
+    private static ErlTerm RandomTerm(Random rng, int depth)
+    {
+        // Bias towards leaves as depth grows, so the shapes terminate.
+        var leafOnly = depth > 6 || rng.Next(100) < depth * 12;
+
+        return (leafOnly ? rng.Next(5) : rng.Next(9)) switch
+        {
+            0 => new ErlInt(rng.NextInt64(long.MinValue, long.MaxValue)),
+            1 => new ErlAtom($"atom{rng.Next(50)}"),
+            2 => new ErlBinary(Enumerable.Range(0, rng.Next(8)).Select(_ => (byte)rng.Next(256)).ToArray()),
+            3 => new ErlFloat(rng.NextDouble() * 1e6),
+            4 => new ErlPid("n@h", (uint)rng.Next(), (uint)rng.Next(), 7),
+            5 => new ErlTuple(Enumerable.Range(0, rng.Next(4)).Select(_ => RandomTerm(rng, depth + 1)).ToArray()),
+            6 => new ErlList(Enumerable.Range(0, rng.Next(4)).Select(_ => RandomTerm(rng, depth + 1)).ToArray()),
+            7 => new ErlList([RandomTerm(rng, depth + 1)], RandomTerm(rng, depth + 1)),
+            _ => new ErlMap(Enumerable.Range(0, rng.Next(3))
+                .Select(k => new KeyValuePair<ErlTerm, ErlTerm>(
+                    new ErlAtom($"k{k}"), RandomTerm(rng, depth + 1))))
+        };
+    }
+
+    [Fact]
     public void A_bitstring_with_an_impossible_trailing_bit_count_is_rejected()
     {
         // BIT_BINARY_EXT: length 1, then the bit count, then the byte.
