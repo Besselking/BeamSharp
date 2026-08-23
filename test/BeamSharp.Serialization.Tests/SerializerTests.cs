@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Numerics;
 using BeamSharp.Terms;
 using Xunit;
@@ -65,7 +66,7 @@ public class ScalarTests
     [Fact]
     public void Big_integers_round_trip()
     {
-        var value = BigInteger.Parse("123456789012345678901234567890");
+        var value = BigInteger.Parse("123456789012345678901234567890", CultureInfo.InvariantCulture);
         Assert.Equal(value, ErlSerializer.Deserialize<BigInteger>(ErlSerializer.Serialize(value, Reflected.Options), Reflected.Options));
     }
 

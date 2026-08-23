@@ -171,7 +171,7 @@ internal sealed class ObjectConverter<T> : ErlConverter<T>
         }
         else if (_hasParameterlessConstructor || typeof(T).IsValueType)
         {
-            instance = Activator.CreateInstance(typeof(T))!;
+            instance = Activator.CreateInstance<T>()!;
         }
         else
         {

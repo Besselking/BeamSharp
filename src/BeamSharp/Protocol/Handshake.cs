@@ -236,6 +236,15 @@ public static class Handshake
     }
 
     /// <summary>OTP's <c>gen_digest/2</c>: md5(cookie ++ integer_to_list(Challenge)).</summary>
+    /// <remarks>
+    /// MD5 is not a choice. The distribution protocol specifies it for the cookie challenge, so a
+    /// node using anything else cannot talk to Erlang at all. It is worth being clear about what
+    /// this does and does not buy: the challenge proves both ends know the cookie and stops a
+    /// straightforward replay, and it is not a substitute for encrypting the transport. See the
+    /// security notes in the README, and <c>ErlangNodeOptions.Tls</c>.
+    /// </remarks>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Security", "CA5351",
+        Justification = "The Erlang distribution protocol specifies MD5 for the cookie challenge.")]
     internal static byte[] Digest(uint challenge, string cookie) =>
         MD5.HashData(Encoding.ASCII.GetBytes(cookie + challenge.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 

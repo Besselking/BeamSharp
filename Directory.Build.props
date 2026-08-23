@@ -1,0 +1,13 @@
+<Project>
+
+  <PropertyGroup>
+    <!--
+      More of the built-in analyzers than the default set. The rules that earn their keep here are
+      the correctness ones: unawaited ValueTasks, cancellation tokens that quietly stop being
+      forwarded, culture-dependent formatting in a protocol library, and inexact stream reads.
+      Rules switched off live in .editorconfig, each with the reason it was switched off.
+    -->
+    <AnalysisMode>Recommended</AnalysisMode>
+  </PropertyGroup>
+
+</Project>

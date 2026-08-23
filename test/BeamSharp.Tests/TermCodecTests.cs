@@ -1,3 +1,4 @@
+using System.Globalization;
 using BeamSharp.Terms;
 using Xunit;
 
@@ -16,8 +17,8 @@ public class TermCodecTests
         { "int_neg1", Erl.Int(-1) },
         { "int_max32", Erl.Int(int.MaxValue) },
         { "int_min32", Erl.Int(int.MinValue) },
-        { "bignum_pos", Erl.Int(System.Numerics.BigInteger.Parse("123456789012345678901234567890")) },
-        { "bignum_neg", Erl.Int(System.Numerics.BigInteger.Parse("-98765432109876543210")) },
+        { "bignum_pos", Erl.Int(System.Numerics.BigInteger.Parse("123456789012345678901234567890", CultureInfo.InvariantCulture)) },
+        { "bignum_neg", Erl.Int(System.Numerics.BigInteger.Parse("-98765432109876543210", CultureInfo.InvariantCulture)) },
         { "float", Erl.Float(3.14159) },
         { "float_neg_zero", Erl.Float(-0.0) },
         { "binary", Erl.String("hello world") },

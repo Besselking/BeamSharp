@@ -1,0 +1,17 @@
+<Project>
+
+  <!-- Everything from the repository root, plus what only shipping code needs. -->
+  <Import Project="$([MSBuild]::GetPathOfFileAbove($(MSBuildThisFile), $(MSBuildThisFileDirectory)..))" />
+
+  <ItemGroup>
+    <!--
+      Async correctness: sync-over-async, async void, missing ConfigureAwait in a library. It found
+      nothing when it was introduced, which is the point — it is here to keep it that way, and it
+      costs nothing while the code stays clean. Scoped to src/ because tests legitimately block in
+      places a library never should.
+    -->
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" Version="17.11.20"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+</Project>
