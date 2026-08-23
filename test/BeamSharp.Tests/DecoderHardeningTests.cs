@@ -24,11 +24,16 @@ public class DecoderHardeningTests
         // (1.5 GB for a map) before noticing the elements were not there.
         var hostile = Claiming(tag, 100_000_000);
 
-        var before = GC.GetTotalAllocatedBytes(precise: true);
-        Assert.Throws<ErlDecodeException>(() => TermDecoder.Decode(hostile));
-        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        // Warm the path first, so jitting the decoder is not counted as decoding.
+        try { TermDecoder.Decode(hostile); } catch (ErlDecodeException) { }
 
-        Assert.True(allocated < 64 * 1024, $"decoding allocated {allocated:N0} bytes for a 6 byte input");
+        // Per-thread, not per-process: xunit runs test classes in parallel, and GetTotalAllocatedBytes
+        // would bill this test for whatever else happened to be running beside it.
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Throws<ErlDecodeException>(() => TermDecoder.Decode(hostile));
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.True(allocated < 16 * 1024, $"decoding allocated {allocated:N0} bytes for a 6 byte input");
     }
 
     [Theory]
