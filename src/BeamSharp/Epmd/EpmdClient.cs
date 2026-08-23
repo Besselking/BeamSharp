@@ -43,6 +43,12 @@ public sealed class EpmdClient : IAsyncDisposable
     private const ushort DistVersionHigh = 6;
     private const ushort DistVersionLow = 6;
 
+    /// <summary>
+    /// EPMD's node list has no length prefix, so it is read until the socket closes. That is an
+    /// unbounded read from a network source unless it is capped; a real EPMD sends a few kilobytes.
+    /// </summary>
+    private const int MaxNamesResponse = 1024 * 1024;
+
     private readonly string _host;
     private readonly int _port;
     private TcpClient? _registration;
@@ -51,6 +57,41 @@ public sealed class EpmdClient : IAsyncDisposable
     {
         _host = host;
         _port = port ?? DefaultPort;
+    }
+
+    /// <summary>
+    /// How long any single exchange with EPMD may take.
+    /// <para>
+    /// Without this a port mapper that accepts the connection and then says nothing stalls node
+    /// startup, or a connect attempt, for as long as the caller is willing to wait.
+    /// </para>
+    /// </summary>
+    public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Runs one exchange under the timeout.
+    /// <para>
+    /// A deadline that fires surfaces as an <see cref="EpmdException"/> whichever way the socket
+    /// happens to unravel — cancellation and a connection reset race each other otherwise, and a
+    /// caller would have to catch both to mean one thing. The caller's own cancellation still
+    /// propagates as cancellation.
+    /// </para>
+    /// </summary>
+    private async Task<T> RunAsync<T>(Func<CancellationToken, Task<T>> exchange, CancellationToken ct)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(Timeout);
+
+        try
+        {
+            return await exchange(deadline.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or SocketException
+                                   && deadline.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            throw new EpmdException(
+                $"EPMD at {_host}:{_port} did not respond within {Timeout.TotalSeconds:0.#}s");
+        }
     }
 
     /// <summary>The EPMD port, honouring <c>ERL_EPMD_PORT</c> just like OTP does.</summary>
@@ -69,7 +110,9 @@ public sealed class EpmdClient : IAsyncDisposable
     {
         if (_registration is not null) throw new InvalidOperationException("already registered with EPMD");
 
-        var client = await HostResolver.ConnectAsync(_host, _port, ct).ConfigureAwait(false);
+        return await RunAsync(async token =>
+        {
+        var client = await HostResolver.ConnectAsync(_host, _port, token).ConfigureAwait(false);
         var stream = client.GetStream();
 
         var name = Encoding.UTF8.GetBytes(aliveName);
@@ -85,10 +128,10 @@ public sealed class EpmdClient : IAsyncDisposable
         name.CopyTo(w[11..]);
         BinaryPrimitives.WriteUInt16BigEndian(w[(11 + name.Length)..], 0); // no extra
 
-        await WriteFramedAsync(stream, body, ct).ConfigureAwait(false);
+        await WriteFramedAsync(stream, body, token).ConfigureAwait(false);
 
         var tag = new byte[1];
-        await ReadExactAsync(stream, tag, ct).ConfigureAwait(false);
+        await ReadExactAsync(stream, tag, token).ConfigureAwait(false);
 
         uint creation;
         switch (tag[0])
@@ -96,7 +139,7 @@ public sealed class EpmdClient : IAsyncDisposable
             case Alive2XResp:
             {
                 var resp = new byte[5];
-                await ReadExactAsync(stream, resp, ct).ConfigureAwait(false);
+                await ReadExactAsync(stream, resp, token).ConfigureAwait(false);
                 if (resp[0] != 0) throw new EpmdException($"EPMD refused registration of '{aliveName}' (likely a duplicate name)");
                 creation = BinaryPrimitives.ReadUInt32BigEndian(resp.AsSpan(1));
                 break;
@@ -104,7 +147,7 @@ public sealed class EpmdClient : IAsyncDisposable
             case Alive2Resp:
             {
                 var resp = new byte[3];
-                await ReadExactAsync(stream, resp, ct).ConfigureAwait(false);
+                await ReadExactAsync(stream, resp, token).ConfigureAwait(false);
                 if (resp[0] != 0) throw new EpmdException($"EPMD refused registration of '{aliveName}' (likely a duplicate name)");
                 creation = BinaryPrimitives.ReadUInt16BigEndian(resp.AsSpan(1));
                 break;
@@ -116,49 +159,63 @@ public sealed class EpmdClient : IAsyncDisposable
 
         _registration = client;
         return new EpmdRegistration(creation);
+        }, ct).ConfigureAwait(false);
     }
 
     /// <summary>Looks up a node by its alive name. Returns null when EPMD does not know it.</summary>
     public async Task<EpmdNodeInfo?> LookupAsync(string aliveName, CancellationToken ct = default)
     {
-        using var client = await HostResolver.ConnectAsync(_host, _port, ct).ConfigureAwait(false);
+        return await RunAsync(async token =>
+        {
+        using var client = await HostResolver.ConnectAsync(_host, _port, token).ConfigureAwait(false);
         var stream = client.GetStream();
 
         var name = Encoding.UTF8.GetBytes(aliveName);
         var body = new byte[1 + name.Length];
         body[0] = Port2Req;
         name.CopyTo(body, 1);
-        await WriteFramedAsync(stream, body, ct).ConfigureAwait(false);
+        await WriteFramedAsync(stream, body, token).ConfigureAwait(false);
 
         var head = new byte[2];
-        await ReadExactAsync(stream, head, ct).ConfigureAwait(false);
+        await ReadExactAsync(stream, head, token).ConfigureAwait(false);
         if (head[0] != Port2Resp) throw new EpmdException($"unexpected EPMD lookup response tag {head[0]}");
         if (head[1] != 0) return null; // not registered
 
         var fixedPart = new byte[8];
-        await ReadExactAsync(stream, fixedPart, ct).ConfigureAwait(false);
+        await ReadExactAsync(stream, fixedPart, token).ConfigureAwait(false);
         var port = BinaryPrimitives.ReadUInt16BigEndian(fixedPart);
         var visibility = (NodeVisibility)fixedPart[2];
         var high = BinaryPrimitives.ReadUInt16BigEndian(fixedPart.AsSpan(4));
         var low = BinaryPrimitives.ReadUInt16BigEndian(fixedPart.AsSpan(6));
 
         var nlen = new byte[2];
-        await ReadExactAsync(stream, nlen, ct).ConfigureAwait(false);
+        await ReadExactAsync(stream, nlen, token).ConfigureAwait(false);
         var nameBytes = new byte[BinaryPrimitives.ReadUInt16BigEndian(nlen)];
-        await ReadExactAsync(stream, nameBytes, ct).ConfigureAwait(false);
+        await ReadExactAsync(stream, nameBytes, token).ConfigureAwait(false);
 
         return new EpmdNodeInfo(Encoding.UTF8.GetString(nameBytes), port, visibility, high, low);
+        }, ct).ConfigureAwait(false);
     }
 
     /// <summary>Lists every node EPMD currently knows about, as name/port pairs.</summary>
     public async Task<IReadOnlyList<(string Name, int Port)>> NamesAsync(CancellationToken ct = default)
     {
-        using var client = await HostResolver.ConnectAsync(_host, _port, ct).ConfigureAwait(false);
+        return await RunAsync<IReadOnlyList<(string Name, int Port)>>(async token =>
+        {
+        using var client = await HostResolver.ConnectAsync(_host, _port, token).ConfigureAwait(false);
         var stream = client.GetStream();
-        await WriteFramedAsync(stream, [NamesReq], ct).ConfigureAwait(false);
+        await WriteFramedAsync(stream, [NamesReq], token).ConfigureAwait(false);
 
         using var ms = new MemoryStream();
-        await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
+        var buffer = new byte[8192];
+        int read;
+        while ((read = await stream.ReadAsync(buffer, token).ConfigureAwait(false)) > 0)
+        {
+            if (ms.Length + read > MaxNamesResponse)
+                throw new EpmdException($"the node list exceeded {MaxNamesResponse:N0} bytes");
+            ms.Write(buffer, 0, read);
+        }
+
         var all = ms.ToArray();
         if (all.Length < 4) return [];
 
@@ -170,6 +227,7 @@ public sealed class EpmdClient : IAsyncDisposable
             if (parts.Length >= 5 && int.TryParse(parts[^1], out var p)) results.Add((parts[1], p));
         }
         return results;
+        }, ct).ConfigureAwait(false);
     }
 
     private static async Task WriteFramedAsync(NetworkStream stream, byte[] body, CancellationToken ct)
