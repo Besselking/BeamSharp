@@ -341,22 +341,59 @@ Raw codec throughput, which sets the ceiling for everything above it:
 dotnet run --project bench/BeamSharp.Benchmarks -c Release -- --filter '*'
 ```
 
+### Encrypted distribution
+
+Set `Tls` and the transport matches an Erlang peer started with `-proto_dist inet_tls`:
+
+```csharp
+var node = new ErlangNode("csharp@myhost", new ErlangNodeOptions
+{
+    Cookie = cookie,
+    Tls = ErlangTlsOptions.FromPemFiles("csharp.crt", "csharp.key", caCertificatePath: "ca.crt")
+});
+```
+
+TLS wraps the connection before a single distribution byte is written, so the handshake, the cookie
+challenge and every message afterwards travel inside it. EPMD is unaffected and stays in the clear —
+it only ever learns a node's name and port.
+
+Two details worth knowing, because getting either wrong produces a connection that hangs rather than
+one that explains itself:
+
+- **Handshake framing differs by transport.** `inet_tcp_dist` uses a 2-byte length prefix during the
+  handshake and 4 bytes after; `inet_tls_dist` uses 4 throughout. Handled automatically, but it is
+  why a TLS node and a plaintext node cannot talk to each other.
+- **Both ends must agree.** There is no negotiation and no fallback, by design. A plaintext peer
+  dialling a TLS node is refused, and the reverse too — verified in both directions.
+
+Defaults follow Erlang's: client certificates are required (`fail_if_no_peer_cert`), and the peer's
+certificate must chain to `TrustedRoots` (`cacertfile`). Hostname verification is **off**, matching
+Erlang, because node certificates are usually issued per node with names that do not match the host
+in a node name. That means any certificate your CA issued can act as any node — the normal model for
+a cluster of mutually trusted peers. Set `VerifyPeerHostname` if your CA also signs certificates you
+would not want impersonating a node.
+
+`ValidateRemoteCertificate`, `ConfigureServer` and `ConfigureClient` are there when you need to
+pin, or to reach for something the shorthand does not expose.
+
 ## Security
 
-Erlang distribution authenticates with a shared secret — the cookie — over an MD5 challenge, and
-then sends every message in the clear. There is no per-message authentication and no encryption.
+Without TLS, Erlang distribution authenticates with a shared secret — the cookie — over an MD5
+challenge, and then sends every message in the clear. There is no per-message authentication and no
+encryption.
 Any peer that can reach the distribution port and knows the cookie can send to any registered name
 on this node, monitor it, link to it, and invoke whatever you exposed through `RpcHandler`. That is
 true of a real BEAM node too; it is a property of the protocol, not of this implementation.
 
 So treat the distribution port the way you would treat an unauthenticated admin socket:
 
+- Turn on TLS. See [Encrypted distribution](#encrypted-distribution); everything below still
+  applies, but an encrypted, mutually authenticated transport removes the worst of it.
 - Keep it off untrusted networks. `BindAddress` defaults to `0.0.0.0`; set it to a private
   interface, or keep the node behind a firewall or inside a private network segment.
 - Use a long, random cookie, and do not commit it. The `testcookie` in the samples is for local
   experimentation only.
-- For cross-host traffic, tunnel it (WireGuard, an SSH tunnel, a service mesh). This library has no
-  TLS transport, so OTP's `inet_tls_dist` is not an option on this side of the connection.
+- For cross-host traffic, use TLS, or tunnel it (WireGuard, an SSH tunnel, a service mesh).
 - Expose narrowly through `RpcHandler`. It runs whatever you register, so register only what you
   are willing to have any cluster peer call.
 
@@ -381,9 +418,8 @@ error message says both.
 
 **Not implemented:** the `global` name registry, the distribution atom cache
 (`DFLAG_DIST_HDR_ATOM_CACHE`) and message fragmentation (`DFLAG_FRAGMENTS`) — the latter two are
-negotiated away, which is legal and costs only some bandwidth on repeated atoms. There is no TLS
-transport, and calling arbitrary code via `spawn_request` is limited to the `erpc` entry points that
-`:rpc.call` and `:erpc.call` use.
+negotiated away, which is legal and costs only some bandwidth on repeated atoms. Calling arbitrary code via `spawn_request` is limited to the
+`erpc` entry points that `:rpc.call` and `:erpc.call` use.
 
 **A C# mailbox is not a process.** It does not die on its own, so a linked or monitoring peer only
 hears about it when you close the mailbox. `TrapExit` defaults to `true`, delivering incoming exits
@@ -422,6 +458,8 @@ test/
   elixir_server.exs             a plain Elixir GenServer for the .NET node to call
   run_integration.sh            runs both directions end to end
   run_aot_probe.sh              publishes and runs the AOT probe
+  run_tls_integration.sh        the same interop suite over an encrypted transport
+  gen_certs.sh                  throwaway CA and node certificates for the TLS test
 ```
 
 ## Testing
@@ -430,7 +468,7 @@ test/
 dotnet test
 ```
 
-181 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
+187 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
 (`test/fixtures.txt`, regenerated by `test/gen_fixtures.escript`) rather than against our own
 encoder, so a shared misunderstanding of the format cannot pass.
 
@@ -446,6 +484,14 @@ test/run_integration.sh
 Starts the C# node and an Elixir node and runs 34 checks inbound and 11 outbound, covering calls,
 casts, sends, monitors, links, exits, rpc, error propagation, concurrency, and C# objects arriving
 as Elixir structs. Needs `elixir` and `epmd` on `PATH`.
+
+```bash
+test/run_tls_integration.sh
+```
+
+Runs the inbound suite again with the Elixir node on `-proto_dist inet_tls` and the C# node on TLS,
+using a throwaway CA. It also checks that a plaintext peer is turned away, since encryption a peer
+can decline is not encryption.
 
 ```bash
 test/run_aot_probe.sh

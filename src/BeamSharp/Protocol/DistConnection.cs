@@ -21,7 +21,7 @@ public sealed class DistConnection : IAsyncDisposable
     private const int MaxFrameLength = 64 * 1024 * 1024;
 
     private readonly TcpClient _client;
-    private readonly NetworkStream _stream;
+    private readonly Stream _stream;
     private readonly CancellationTokenSource _cts = new();
 
     /// <summary>
@@ -45,7 +45,7 @@ public sealed class DistConnection : IAsyncDisposable
     private long _lastSentTicks;
     private int _closed;
 
-    internal DistConnection(TcpClient client, NetworkStream stream, HandshakeResult handshake, TimeSpan tickTime)
+    internal DistConnection(TcpClient client, Stream stream, HandshakeResult handshake, TimeSpan tickTime)
     {
         _client = client;
         _stream = stream;

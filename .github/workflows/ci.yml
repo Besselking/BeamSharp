@@ -68,3 +68,4 @@ jobs:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
       - run: test/run_integration.sh
+      - run: test/run_tls_integration.sh
