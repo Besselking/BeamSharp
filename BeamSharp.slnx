@@ -5,8 +5,10 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/BeamSharp/BeamSharp.csproj" />
+    <Project Path="src/BeamSharp.Serialization/BeamSharp.Serialization.csproj" />
   </Folder>
   <Folder Name="/test/">
+    <Project Path="test/BeamSharp.Serialization.Tests/BeamSharp.Serialization.Tests.csproj" />
     <Project Path="test/BeamSharp.Tests/BeamSharp.Tests.csproj" />
   </Folder>
 </Solution>

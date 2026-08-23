@@ -1,6 +1,10 @@
 # Exercises the C# node from a real Elixir node.
 #
-#   elixir --sname tester --cookie testcookie test/elixir_client.exs
+#   elixir --sname tester --cookie testcookie \
+#     -r test/elixir_structs.exs test/elixir_client.exs
+#
+# The structs load with -r so they are compiled before this file, which is what lets it use
+# struct literals and patterns.
 
 target = :"csharp@#{:inet.gethostname() |> elem(1)}"
 
@@ -191,6 +195,57 @@ check.("monitoring by name, then killing it", fn ->
     3_000 -> {:error, "no DOWN within 3s"}
   end
 end)
+
+# --- serialization: C# objects arriving as Elixir structs -------------------
+
+check.("a C# record arrives as a real %BeamSharp.Person{}", fn ->
+  {:ok, person} = GenServer.call({:directory, target}, {:find, "ada"})
+
+  cond do
+    not is_struct(person, BeamSharp.Person) -> {:error, "not a struct: #{inspect(person)}"}
+    person.first_name != "Ada" -> {:error, "wrong name: #{inspect(person)}"}
+    person.age != 36 -> {:error, "wrong age: #{inspect(person)}"}
+    true -> {:ok, inspect(person)}
+  end
+end)
+
+check.("it pattern matches like any other struct", fn ->
+  {:ok, %BeamSharp.Person{first_name: name, email: email}} =
+    GenServer.call({:directory, target}, {:find, "alan"})
+
+  if name == "Alan" and email == "alan@example.com",
+    do: {:ok, "#{name} <#{email}>"},
+    else: {:error, "got #{inspect({name, email})}"}
+end)
+
+expect.("PascalCase became snake_case atom keys", fn ->
+  {:ok, person} = GenServer.call({:directory, target}, {:find, "ada"})
+  person |> Map.from_struct() |> Map.keys() |> Enum.sort()
+end, [:age, :email, :first_name, :status])
+
+expect.("a C# enum arrives as an atom", fn ->
+  {:ok, person} = GenServer.call({:directory, target}, {:find, "grace"})
+  person.status
+end, :on_leave)
+
+expect.("a C# null arrives as nil", fn ->
+  {:ok, person} = GenServer.call({:directory, target}, {:find, "grace"})
+  person.email
+end, nil)
+
+expect.("a list of records arrives as a list of structs", fn ->
+  target |> then(&GenServer.call({:directory, &1}, :all)) |> Enum.map(& &1.first_name)
+end, ["Ada", "Grace", "Alan"])
+
+expect.("a struct built in Elixir survives a round trip through a C# object", fn ->
+  sent = %BeamSharp.Person{first_name: "Hedy", age: 30, email: "hedy@example.com", status: :active}
+  GenServer.call({:directory, target}, {:echo, sent})
+end, %BeamSharp.Person{first_name: "Hedy", age: 30, email: "hedy@example.com", status: :active})
+
+expect.("C# can deserialize, modify and return the struct", fn ->
+  sent = %BeamSharp.Person{first_name: "Hedy", age: 30, email: nil, status: :active}
+  GenServer.call({:directory, target}, {:birthday, sent}).age
+end, 31)
 
 expect.(":rpc.call/4", fn -> :rpc.call(target, CSharp, :add, [2, 3]) end, 5)
 expect.(":erpc.call/4", fn -> :erpc.call(target, :csharp, :reverse, ["stressed"]) end, "desserts")

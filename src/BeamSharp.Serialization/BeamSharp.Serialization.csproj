@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>BeamSharp.Serialization</AssemblyName>
+    <RootNamespace>BeamSharp.Serialization</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>BeamSharp.Serialization</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Marijn Besseling</Authors>
+    <Description>
+      Maps C# objects to and from Erlang terms for BeamSharp. A C# record can arrive on the Elixir
+      side as a real %Struct{}, with PascalCase names converted to snake_case atoms. Conversion goes
+      through a converter abstraction that a source generator can supply, so reflection is a
+      replaceable default rather than a requirement.
+    </Description>
+    <PackageTags>erlang;elixir;beam;otp;serialization;serializer;interop</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/Besselking/BeamSharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Besselking/BeamSharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../BeamSharp/BeamSharp.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BeamSharp.Serialization.Tests" />
+  </ItemGroup>
+
+</Project>
