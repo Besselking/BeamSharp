@@ -1,5 +1,6 @@
 using BeamSharp.Epmd;
 using BeamSharp.Protocol;
+using BeamSharp.Security;
 
 namespace BeamSharp.Node;
 
@@ -24,6 +25,17 @@ public sealed class ErlangNodeOptions
     /// </summary>
     public NodeVisibility Visibility { get; set; } = NodeVisibility.Hidden;
 
+    /// <summary>
+    /// How long a connection may take to get through TLS negotiation and the distribution
+    /// handshake before it is dropped, matching OTP's <c>net_kernel:connecttime()</c>.
+    /// </summary>
+    /// <remarks>
+    /// Without a bound here a peer that connects and then says nothing holds the attempt open
+    /// forever, and so does a mismatched transport: a TLS dialler reaching a plaintext node makes
+    /// that node read a length prefix out of a ClientHello and wait for bytes that never arrive.
+    /// </remarks>
+    public TimeSpan HandshakeTimeout { get; set; } = TimeSpan.FromSeconds(7);
+
     /// <summary>Must match the peer's <c>net_ticktime</c> (60 seconds by default in OTP).</summary>
     public TimeSpan TickTime { get; set; } = TimeSpan.FromSeconds(60);
 
@@ -32,6 +44,16 @@ public sealed class ErlangNodeOptions
 
     /// <summary>EPMD port; defaults to <c>ERL_EPMD_PORT</c> or 4369.</summary>
     public int? EpmdPort { get; set; }
+
+    /// <summary>
+    /// Encrypts the distribution transport, matching a peer started with
+    /// <c>-proto_dist inet_tls</c>. Null leaves the connection in the clear.
+    /// </summary>
+    /// <remarks>
+    /// Both ends must agree: a TLS node and a plaintext node cannot talk to each other, and the
+    /// failure looks like a connection that stalls rather than one that explains itself.
+    /// </remarks>
+    public ErlangTlsOptions? Tls { get; set; }
 
     /// <summary>Capabilities to advertise during the handshake.</summary>
     public DistributionFlags Flags { get; set; } = DistributionFlags.Default;

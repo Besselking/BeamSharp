@@ -9,10 +9,21 @@ public sealed record HandshakeResult(string PeerNode, DistributionFlags Flags, u
 
 /// <summary>
 /// The OTP 23+ distribution handshake ('N' messages, 64-bit flags, MD5 cookie challenge).
-/// Frames are length-prefixed with 2 bytes during the handshake and 4 bytes afterwards.
+/// <para>
+/// The length prefix on handshake frames depends on the transport, which is easy to miss:
+/// <c>inet_tcp_dist</c> uses two bytes during the handshake and switches to four afterwards, while
+/// <c>inet_tls_dist</c> uses four throughout. Getting it wrong produces a connection that hangs
+/// rather than one that reports anything useful.
+/// </para>
 /// </summary>
 public static class Handshake
 {
+    /// <summary>Handshake framing for a plain TCP connection.</summary>
+    public const int TcpLengthPrefix = 2;
+
+    /// <summary>Handshake framing for a TLS connection, which never uses the 2-byte form.</summary>
+    public const int TlsLengthPrefix = 4;
+
     /// <summary>Runs the handshake as the side that accepted the TCP connection.</summary>
     public static async Task<HandshakeResult> AcceptAsync(
         Stream stream,
@@ -20,31 +31,32 @@ public static class Handshake
         uint localCreation,
         DistributionFlags localFlags,
         Func<string, string> cookieForNode,
+        int lengthPrefix = TcpLengthPrefix,
         CancellationToken ct = default)
     {
         // 1. Peer sends its name.
-        var nameMsg = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+        var nameMsg = await ReadFrameAsync(stream, lengthPrefix, ct).ConfigureAwait(false);
         var (peerFlags, peerNode, peerCreation, isOldFormat) = ParseName(nameMsg);
 
         var missing = DistributionFlags.Mandatory & ~ExpandMandatoryDigest(peerFlags);
         if (!isOldFormat && missing != DistributionFlags.None)
         {
-            await SendStatusAsync(stream, "not_allowed", ct).ConfigureAwait(false);
+            await SendStatusAsync(stream, "not_allowed", lengthPrefix, ct).ConfigureAwait(false);
             throw new HandshakeException($"peer {peerNode} is missing mandatory distribution flags: {missing}");
         }
 
         // 2. Accept it.
-        await SendStatusAsync(stream, "ok", ct).ConfigureAwait(false);
+        await SendStatusAsync(stream, "ok", lengthPrefix, ct).ConfigureAwait(false);
 
         // 3. Our challenge.
         var ourChallenge = NextChallenge();
-        await WriteFrameAsync(stream, BuildNewChallenge(localFlags, ourChallenge, localCreation, localNode), ct)
+        await WriteFrameAsync(stream, BuildNewChallenge(localFlags, ourChallenge, localCreation, localNode), lengthPrefix, ct)
             .ConfigureAwait(false);
 
         // 3b. A pre-OTP-23 peer follows up with the high flag bits and its creation.
         if (isOldFormat)
         {
-            var complement = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+            var complement = await ReadFrameAsync(stream, lengthPrefix, ct).ConfigureAwait(false);
             if (complement.Length != 9 || complement[0] != (byte)'c')
                 throw new HandshakeException("expected a 'c' complement message from a pre-OTP-23 peer");
             var highFlags = BinaryPrimitives.ReadUInt32BigEndian(complement.AsSpan(1));
@@ -55,7 +67,7 @@ public static class Handshake
         var cookie = cookieForNode(peerNode);
 
         // 4. Peer answers our challenge and poses its own.
-        var reply = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+        var reply = await ReadFrameAsync(stream, lengthPrefix, ct).ConfigureAwait(false);
         if (reply.Length != 21 || reply[0] != (byte)'r')
             throw new HandshakeException("malformed challenge reply");
         var peerChallenge = BinaryPrimitives.ReadUInt32BigEndian(reply.AsSpan(1));
@@ -67,7 +79,7 @@ public static class Handshake
         var ack = new byte[17];
         ack[0] = (byte)'a';
         Digest(peerChallenge, cookie).CopyTo(ack, 1);
-        await WriteFrameAsync(stream, ack, ct).ConfigureAwait(false);
+        await WriteFrameAsync(stream, ack, lengthPrefix, ct).ConfigureAwait(false);
 
         return new HandshakeResult(peerNode, Negotiate(localFlags, ExpandMandatoryDigest(peerFlags)), peerCreation);
     }
@@ -80,13 +92,14 @@ public static class Handshake
         DistributionFlags localFlags,
         string expectedPeerNode,
         string cookie,
+        int lengthPrefix = TcpLengthPrefix,
         CancellationToken ct = default)
     {
         // 1. Announce ourselves.
-        await WriteFrameAsync(stream, BuildNewName(localFlags, localCreation, localNode), ct).ConfigureAwait(false);
+        await WriteFrameAsync(stream, BuildNewName(localFlags, localCreation, localNode), lengthPrefix, ct).ConfigureAwait(false);
 
         // 2. Status.
-        var statusMsg = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+        var statusMsg = await ReadFrameAsync(stream, lengthPrefix, ct).ConfigureAwait(false);
         if (statusMsg.Length < 1 || statusMsg[0] != (byte)'s')
             throw new HandshakeException("expected a status message");
         var status = Encoding.ASCII.GetString(statusMsg, 1, statusMsg.Length - 1);
@@ -97,14 +110,14 @@ public static class Handshake
                 break;
             case "alive":
                 // The peer still has a live connection to us; decline to take it over.
-                await SendStatusAsync(stream, "false", ct).ConfigureAwait(false);
+                await SendStatusAsync(stream, "false", lengthPrefix, ct).ConfigureAwait(false);
                 throw new HandshakeException($"{expectedPeerNode} reports an existing connection to {localNode}");
             default:
                 throw new HandshakeException($"{expectedPeerNode} rejected the connection: {status}");
         }
 
         // 3. Their challenge.
-        var challengeMsg = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+        var challengeMsg = await ReadFrameAsync(stream, lengthPrefix, ct).ConfigureAwait(false);
         if (challengeMsg.Length < 19 || challengeMsg[0] != (byte)'N')
             throw new HandshakeException("malformed challenge message");
         var peerFlags = (DistributionFlags)BinaryPrimitives.ReadUInt64BigEndian(challengeMsg.AsSpan(1));
@@ -122,10 +135,10 @@ public static class Handshake
         reply[0] = (byte)'r';
         BinaryPrimitives.WriteUInt32BigEndian(reply.AsSpan(1), ourChallenge);
         Digest(peerChallenge, cookie).CopyTo(reply, 5);
-        await WriteFrameAsync(stream, reply, ct).ConfigureAwait(false);
+        await WriteFrameAsync(stream, reply, lengthPrefix, ct).ConfigureAwait(false);
 
         // 5. Verify their answer.
-        var ack = await ReadFrameAsync(stream, ct).ConfigureAwait(false);
+        var ack = await ReadFrameAsync(stream, lengthPrefix, ct).ConfigureAwait(false);
         if (ack.Length != 17 || ack[0] != (byte)'a')
             throw new HandshakeException("malformed challenge ack");
         if (!CryptographicOperations.FixedTimeEquals(ack.AsSpan(1), Digest(ourChallenge, cookie)))
@@ -188,10 +201,10 @@ public static class Handshake
         }
     }
 
-    private static Task SendStatusAsync(Stream stream, string status, CancellationToken ct)
+    private static Task SendStatusAsync(Stream stream, string status, int lengthPrefix, CancellationToken ct)
     {
         var bytes = Encoding.ASCII.GetBytes("s" + status);
-        return WriteFrameAsync(stream, bytes, ct);
+        return WriteFrameAsync(stream, bytes, lengthPrefix, ct);
     }
 
     // --- flag helpers -------------------------------------------------------
@@ -221,23 +234,32 @@ public static class Handshake
     internal static byte[] Digest(uint challenge, string cookie) =>
         MD5.HashData(Encoding.ASCII.GetBytes(cookie + challenge.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
-    // --- 2-byte framing used during the handshake ---------------------------
+    // --- handshake framing, 2 or 4 bytes depending on the transport ---------
 
-    private static async Task<byte[]> ReadFrameAsync(Stream stream, CancellationToken ct)
+    private static async Task<byte[]> ReadFrameAsync(Stream stream, int lengthPrefix, CancellationToken ct)
     {
-        var header = new byte[2];
+        var header = new byte[lengthPrefix];
         await ReadExactAsync(stream, header, ct).ConfigureAwait(false);
-        var len = BinaryPrimitives.ReadUInt16BigEndian(header);
-        var body = new byte[len];
+
+        var length = lengthPrefix == 2
+            ? BinaryPrimitives.ReadUInt16BigEndian(header)
+            : BinaryPrimitives.ReadUInt32BigEndian(header);
+
+        if (length > 64 * 1024)
+            throw new HandshakeException($"a handshake frame of {length} bytes is implausible");
+
+        var body = new byte[length];
         await ReadExactAsync(stream, body, ct).ConfigureAwait(false);
         return body;
     }
 
-    private static async Task WriteFrameAsync(Stream stream, byte[] body, CancellationToken ct)
+    private static async Task WriteFrameAsync(Stream stream, byte[] body, int lengthPrefix, CancellationToken ct)
     {
-        var frame = new byte[2 + body.Length];
-        BinaryPrimitives.WriteUInt16BigEndian(frame, (ushort)body.Length);
-        body.CopyTo(frame, 2);
+        var frame = new byte[lengthPrefix + body.Length];
+        if (lengthPrefix == 2) BinaryPrimitives.WriteUInt16BigEndian(frame, (ushort)body.Length);
+        else BinaryPrimitives.WriteUInt32BigEndian(frame, (uint)body.Length);
+        body.CopyTo(frame, lengthPrefix);
+
         await stream.WriteAsync(frame, ct).ConfigureAwait(false);
         await stream.FlushAsync(ct).ConfigureAwait(false);
     }

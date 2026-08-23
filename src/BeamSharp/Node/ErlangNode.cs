@@ -1,9 +1,11 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using BeamSharp.Epmd;
 using BeamSharp.Networking;
 using BeamSharp.Protocol;
+using BeamSharp.Security;
 using BeamSharp.Terms;
 
 namespace BeamSharp.Node;
@@ -30,6 +32,7 @@ public sealed class ErlangNode : IAsyncDisposable
     private readonly List<Task> _hostedServers = [];
 
     private TcpListener? _listener;
+    private int _disposed;
     private uint _pidId;
     private uint _pidSerial;
     private long _refCounter;
@@ -60,6 +63,16 @@ public sealed class ErlangNode : IAsyncDisposable
 
     /// <summary>The TCP port the distribution listener ended up on.</summary>
     public int Port { get; private set; }
+
+    /// <summary>True when the distribution transport is encrypted.</summary>
+    public bool UsesTls => _options.Tls is not null;
+
+    /// <summary>
+    /// TLS carries the handshake in 4-byte frames throughout, where plain TCP uses 2-byte frames
+    /// until the handshake finishes. Mismatching this hangs the connection instead of failing it.
+    /// </summary>
+    private int HandshakePrefix =>
+        UsesTls ? Handshake.TlsLengthPrefix : Handshake.TcpLengthPrefix;
 
     /// <summary>Names of the peers currently connected.</summary>
     public IReadOnlyCollection<string> ConnectedNodes => _connections.Keys.ToArray();
@@ -115,11 +128,21 @@ public sealed class ErlangNode : IAsyncDisposable
                 try
                 {
                     client.NoDelay = true;
-                    var stream = client.GetStream();
+
+                    using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    attempt.CancelAfter(_options.HandshakeTimeout);
+
+                    var stream = await WrapForServerAsync(client, attempt.Token).ConfigureAwait(false);
                     var handshake = await Handshake
-                        .AcceptAsync(stream, Name.Full, Creation, _options.Flags, _ => Cookie, ct)
+                        .AcceptAsync(stream, Name.Full, Creation, _options.Flags, _ => Cookie,
+                            HandshakePrefix, attempt.Token)
                         .ConfigureAwait(false);
                     AttachConnection(new DistConnection(client, stream, handshake, _options.TickTime));
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    Log($"inbound handshake timed out after {_options.HandshakeTimeout.TotalSeconds:0}s");
+                    client.Dispose();
                 }
                 catch (Exception ex)
                 {
@@ -152,12 +175,22 @@ public sealed class ErlangNode : IAsyncDisposable
             }
 
             var client = await HostResolver.ConnectAsync(peer.Host, info.Port, ct).ConfigureAwait(false);
-            var stream = client.GetStream();
+
+            using var attempt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            attempt.CancelAfter(_options.HandshakeTimeout);
+
+            var stream = await WrapForClientAsync(client, peer.Host, attempt.Token).ConfigureAwait(false);
             var handshake = await Handshake
-                .ConnectAsync(stream, Name.Full, Creation, _options.Flags, peerNode, Cookie, ct)
+                .ConnectAsync(stream, Name.Full, Creation, _options.Flags, peerNode, Cookie,
+                    HandshakePrefix, attempt.Token)
                 .ConfigureAwait(false);
             AttachConnection(new DistConnection(client, stream, handshake, _options.TickTime));
             return true;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            Log($"connecting to {peerNode} timed out after {_options.HandshakeTimeout.TotalSeconds:0}s");
+            return false;
         }
         catch (Exception ex)
         {
@@ -167,6 +200,48 @@ public sealed class ErlangNode : IAsyncDisposable
         finally
         {
             _connectLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Negotiates TLS before a single distribution byte is exchanged, which is what
+    /// <c>inet_tls_dist</c> does. Without TLS configured this is the raw socket.
+    /// </summary>
+    private async Task<Stream> WrapForServerAsync(TcpClient client, CancellationToken ct)
+    {
+        var stream = client.GetStream();
+        if (_options.Tls is not { } tls) return stream;
+
+        var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
+        try
+        {
+            await ssl.AuthenticateAsServerAsync(tls.BuildServerOptions(), ct).ConfigureAwait(false);
+            Log($"inbound TLS established: {ssl.SslProtocol}, {ssl.NegotiatedCipherSuite}");
+            return ssl;
+        }
+        catch
+        {
+            await ssl.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task<Stream> WrapForClientAsync(TcpClient client, string targetHost, CancellationToken ct)
+    {
+        var stream = client.GetStream();
+        if (_options.Tls is not { } tls) return stream;
+
+        var ssl = new SslStream(stream, leaveInnerStreamOpen: false);
+        try
+        {
+            await ssl.AuthenticateAsClientAsync(tls.BuildClientOptions(targetHost), ct).ConfigureAwait(false);
+            Log($"outbound TLS established: {ssl.SslProtocol}, {ssl.NegotiatedCipherSuite}");
+            return ssl;
+        }
+        catch
+        {
+            await ssl.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -728,8 +803,11 @@ public sealed class ErlangNode : IAsyncDisposable
 
     private void Log(string message) => _options.Log?.Invoke(message);
 
+    /// <summary>Stops the node. Safe to call more than once, as the dispose contract requires.</summary>
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
         await _cts.CancelAsync().ConfigureAwait(false);
         _listener?.Stop();
 

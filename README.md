@@ -208,6 +208,7 @@ second API.
 | `BeamSharp` | The node: EPMD, handshake, signals, terms |
 | `BeamSharp.Serialization` | Object mapping and the source generator. No reflection anywhere in it |
 | `BeamSharp.Serialization.Reflection` | The reflection fallback. Opt in by referencing it |
+| `BeamSharp.Extensions.Hosting` | DI, `IHostedService`, `ILogger` and metrics |
 
 The split is the whole trimming story: the core serializer contains no reflection at all, so there
 is nothing to annotate, suppress or hope the trimmer keeps. An app that does not reference the
@@ -281,22 +282,118 @@ not derive from `ErlSerializerContext`), `BS1003` (no constructor the deserializ
 `BS1004` (a type no converter can be generated for), `BS1005` (`[ErlRecord]` with inherited members,
 whose order is not guaranteed to match).
 
+## Hosting
+
+`BeamSharp.Extensions.Hosting` runs a node for the lifetime of the application:
+
+```csharp
+builder.Services
+    .AddBeamSharpNode(options =>
+    {
+        options.NodeName = "orders@myhost";
+        options.Cookie = builder.Configuration["Erlang:Cookie"];
+    })
+    .AddGenServer<OrderServer>("orders")
+    .AddRpcHandler(sp => sp.GetRequiredService<OrderRpc>());
+```
+
+Handlers are built from the container, and everything is registered **before** the listener accepts
+its first connection, so a peer can never arrive to find a node still wiring itself up. Injecting
+`ErlangNode` works once the host has started; asking for it earlier throws rather than handing back
+a half-built one.
+
+Diagnostics go where you expect: node events through `ILogger`, and connection counts through
+`System.Diagnostics.Metrics` on the `BeamSharp` meter, so `dotnet-counters` and OpenTelemetry pick
+them up with no extra wiring.
+
+`AddBeamSharpNode(IConfiguration)` binds the whole thing from `appsettings.json`. That overload is
+annotated `[RequiresUnreferencedCode]`, because configuration binding is reflective — use the
+`Action<BeamSharpOptions>` overload under AOT.
+
+## Performance
+
+Measured with BenchmarkDotNet on an M-series Mac, .NET 10. `bench/BeamSharp.Benchmarks`.
+
+Generated converters against the reflection fallback, same objects:
+
+| | Reflection | Generated | |
+| --- | ---: | ---: | --- |
+| Read a flat record | 400 ns / 792 B | **169 ns / 176 B** | 2.4× faster, 4.5× less garbage |
+| Read a nested record | 1,851 ns / 3,296 B | **793 ns / 1,112 B** | 2.3× faster, 3× less garbage |
+| Write a flat record | 393 ns / 1,040 B | **300 ns / 896 B** | 1.3× faster |
+| Write a nested record | 1,749 ns / 4,600 B | **1,425 ns / 4,096 B** | 1.2× faster |
+
+Reading gains far more than writing, and the reason is worth knowing: generated reads call a
+constructor directly where reflection goes through `Activator.CreateInstance` and `SetValue`, while
+both write paths still do a converter lookup per member and build the same entry list. Writing is
+where the remaining headroom is.
+
+Raw codec throughput, which sets the ceiling for everything above it:
+
+| | Time | Allocated |
+| --- | ---: | ---: |
+| Encode a `gen_server` call | 129 ns | 440 B |
+| Decode a `gen_server` call | 233 ns | 808 B |
+| Encode 200 maps | 24.2 µs | 54.8 KB |
+| Decode 200 maps | 53.9 µs | 168 KB |
+
+```bash
+dotnet run --project bench/BeamSharp.Benchmarks -c Release -- --filter '*'
+```
+
+### Encrypted distribution
+
+Set `Tls` and the transport matches an Erlang peer started with `-proto_dist inet_tls`:
+
+```csharp
+var node = new ErlangNode("csharp@myhost", new ErlangNodeOptions
+{
+    Cookie = cookie,
+    Tls = ErlangTlsOptions.FromPemFiles("csharp.crt", "csharp.key", caCertificatePath: "ca.crt")
+});
+```
+
+TLS wraps the connection before a single distribution byte is written, so the handshake, the cookie
+challenge and every message afterwards travel inside it. EPMD is unaffected and stays in the clear —
+it only ever learns a node's name and port.
+
+Two details worth knowing, because getting either wrong produces a connection that hangs rather than
+one that explains itself:
+
+- **Handshake framing differs by transport.** `inet_tcp_dist` uses a 2-byte length prefix during the
+  handshake and 4 bytes after; `inet_tls_dist` uses 4 throughout. Handled automatically, but it is
+  why a TLS node and a plaintext node cannot talk to each other.
+- **Both ends must agree.** There is no negotiation and no fallback, by design. A plaintext peer
+  dialling a TLS node is refused, and the reverse too — verified in both directions.
+
+Defaults follow Erlang's: client certificates are required (`fail_if_no_peer_cert`), and the peer's
+certificate must chain to `TrustedRoots` (`cacertfile`). Hostname verification is **off**, matching
+Erlang, because node certificates are usually issued per node with names that do not match the host
+in a node name. That means any certificate your CA issued can act as any node — the normal model for
+a cluster of mutually trusted peers. Set `VerifyPeerHostname` if your CA also signs certificates you
+would not want impersonating a node.
+
+`ValidateRemoteCertificate`, `ConfigureServer` and `ConfigureClient` are there when you need to
+pin, or to reach for something the shorthand does not expose.
+
 ## Security
 
-Erlang distribution authenticates with a shared secret — the cookie — over an MD5 challenge, and
-then sends every message in the clear. There is no per-message authentication and no encryption.
+Without TLS, Erlang distribution authenticates with a shared secret — the cookie — over an MD5
+challenge, and then sends every message in the clear. There is no per-message authentication and no
+encryption.
 Any peer that can reach the distribution port and knows the cookie can send to any registered name
 on this node, monitor it, link to it, and invoke whatever you exposed through `RpcHandler`. That is
 true of a real BEAM node too; it is a property of the protocol, not of this implementation.
 
 So treat the distribution port the way you would treat an unauthenticated admin socket:
 
+- Turn on TLS. See [Encrypted distribution](#encrypted-distribution); everything below still
+  applies, but an encrypted, mutually authenticated transport removes the worst of it.
 - Keep it off untrusted networks. `BindAddress` defaults to `0.0.0.0`; set it to a private
   interface, or keep the node behind a firewall or inside a private network segment.
 - Use a long, random cookie, and do not commit it. The `testcookie` in the samples is for local
   experimentation only.
-- For cross-host traffic, tunnel it (WireGuard, an SSH tunnel, a service mesh). This library has no
-  TLS transport, so OTP's `inet_tls_dist` is not an option on this side of the connection.
+- For cross-host traffic, use TLS, or tunnel it (WireGuard, an SSH tunnel, a service mesh).
 - Expose narrowly through `RpcHandler`. It runs whatever you register, so register only what you
   are willing to have any cluster peer call.
 
@@ -321,9 +418,8 @@ error message says both.
 
 **Not implemented:** the `global` name registry, the distribution atom cache
 (`DFLAG_DIST_HDR_ATOM_CACHE`) and message fragmentation (`DFLAG_FRAGMENTS`) — the latter two are
-negotiated away, which is legal and costs only some bandwidth on repeated atoms. There is no TLS
-transport, and calling arbitrary code via `spawn_request` is limited to the `erpc` entry points that
-`:rpc.call` and `:erpc.call` use.
+negotiated away, which is legal and costs only some bandwidth on repeated atoms. Calling arbitrary code via `spawn_request` is limited to the
+`erpc` entry points that `:rpc.call` and `:erpc.call` use.
 
 **A C# mailbox is not a process.** It does not die on its own, so a linked or monitoring peer only
 hears about it when you close the mailbox. `TrapExit` defaults to `true`, delivering incoming exits
@@ -344,6 +440,10 @@ src/BeamSharp.Serialization.Generator/
                the Roslyn generator, shipped inside the serialization package as an analyzer
 src/BeamSharp.Serialization.Reflection/
                the reflection fallback, kept apart so an AOT app cannot reach it
+src/BeamSharp.Extensions.Hosting/
+               DI, IHostedService, ILogger and metrics
+bench/BeamSharp.Benchmarks/
+               generated vs reflection, and raw codec throughput
 samples/
   BeamSharp.Server   a .NET node for Elixir to call into
   BeamSharp.Client   a .NET node that calls into Elixir
@@ -351,12 +451,15 @@ test/
   BeamSharp.Tests               unit tests over the codec and protocol
   BeamSharp.Serialization.Tests unit tests over the object mapping and the generator
   BeamSharp.Aot.Probe            a NativeAOT console app proving the generated path needs no reflection
+  BeamSharp.Extensions.Hosting.Tests  node lifetime under a real host
   gen_fixtures.escript          regenerates fixtures.txt from a real Erlang runtime
   elixir_client.exs             34 checks driving the .NET node from Elixir
   elixir_structs.exs            the Elixir structs the C# records map onto
   elixir_server.exs             a plain Elixir GenServer for the .NET node to call
   run_integration.sh            runs both directions end to end
   run_aot_probe.sh              publishes and runs the AOT probe
+  run_tls_integration.sh        the same interop suite over an encrypted transport
+  gen_certs.sh                  throwaway CA and node certificates for the TLS test
 ```
 
 ## Testing
@@ -365,9 +468,14 @@ test/
 dotnet test
 ```
 
-164 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
+187 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
 (`test/fixtures.txt`, regenerated by `test/gen_fixtures.escript`) rather than against our own
 encoder, so a shared misunderstanding of the format cannot pass.
+
+The decoder reads bytes off a socket, so it is also fuzzed: 50,000 random inputs, every truncation
+of six real fixtures, and 8,000 single-byte mutations, all of which must produce `ErlDecodeException`
+and nothing else. Hostile element counts are checked against the bytes actually remaining, so a
+six-byte frame claiming a hundred million element tuple allocates nothing.
 
 ```bash
 test/run_integration.sh
@@ -376,6 +484,14 @@ test/run_integration.sh
 Starts the C# node and an Elixir node and runs 34 checks inbound and 11 outbound, covering calls,
 casts, sends, monitors, links, exits, rpc, error propagation, concurrency, and C# objects arriving
 as Elixir structs. Needs `elixir` and `epmd` on `PATH`.
+
+```bash
+test/run_tls_integration.sh
+```
+
+Runs the inbound suite again with the Elixir node on `-proto_dist inet_tls` and the C# node on TLS,
+using a throwaway CA. It also checks that a plaintext peer is turned away, since encryption a peer
+can decline is not encryption.
 
 ```bash
 test/run_aot_probe.sh

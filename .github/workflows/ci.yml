@@ -18,6 +18,14 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
+      # The hosting tests start a real node, which needs a port mapper. Without one they skip, so
+      # install Erlang to make sure they actually run somewhere.
+      - uses: erlef/setup-beam@v1
+        if: runner.os == 'Linux'
+        with:
+          otp-version: '27'
+      - run: epmd -daemon
+        if: runner.os == 'Linux'
       - run: dotnet test --nologo
 
   aot:
@@ -60,3 +68,4 @@ jobs:
           otp-version: ${{ matrix.otp }}
           elixir-version: ${{ matrix.elixir }}
       - run: test/run_integration.sh
+      - run: test/run_tls_integration.sh

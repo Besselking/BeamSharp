@@ -1,5 +1,6 @@
 using BeamSharp.Epmd;
 using BeamSharp.Node;
+using BeamSharp.Security;
 using BeamSharp.Serialization;
 using BeamSharp.Terms;
 
@@ -7,13 +8,25 @@ using BeamSharp.Terms;
 //
 //   dotnet run --project samples/BeamSharp.Server -- [nodename] [cookie]
 
-var positional = args.Where(a => !a.StartsWith("--")).ToArray();
+var flagValues = args.SkipWhile(a => a != "--tls").Skip(1).Take(1).ToArray();
+var positional = args.Where(a => !a.StartsWith("--") && !flagValues.Contains(a)).ToArray();
 var nodeName = positional.Length > 0 ? positional[0] : $"csharp@{NodeName.LocalShortHost}";
 var cookie = positional.Length > 1 ? positional[1] : null;
+
+// --tls <dir> turns on encrypted distribution, matching an Erlang peer started with
+// -proto_dist inet_tls. The directory is the one test/gen_certs.sh writes.
+var certificateDirectory = args.SkipWhile(a => a != "--tls").Skip(1).FirstOrDefault();
+var tls = certificateDirectory is null
+    ? null
+    : ErlangTlsOptions.FromPemFiles(
+        Path.Combine(certificateDirectory, "csharp.crt"),
+        Path.Combine(certificateDirectory, "csharp.key"),
+        Path.Combine(certificateDirectory, "ca.crt"));
 
 var node = new ErlangNode(nodeName, new ErlangNodeOptions
 {
     Cookie = cookie,
+    Tls = tls,
     // Hidden by default. --visible joins the mesh, which also means peers expect us to speak
     // the `global` name-registry protocol that this library does not implement.
     Visibility = args.Contains("--visible") ? NodeVisibility.Visible : NodeVisibility.Hidden,
@@ -53,6 +66,7 @@ await node.StartAsync();
 Console.WriteLine($$"""
 
     Node   : {{node.Name}}
+    TLS    : {{(node.UsesTls ? "on" : "off")}}
     Port   : {{node.Port}}
     Cookie : {{node.Cookie}}
 

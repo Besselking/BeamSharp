@@ -10,3 +10,6 @@ obj/
 
 # macOS
 .DS_Store
+
+# Generated test certificates and keys; never committed.
+test/certs/

@@ -61,14 +61,17 @@ public ref struct TermDecoder
             {
                 // Legacy: 31 bytes of "%.20e" text.
                 var text = Encoding.ASCII.GetString(Take(31)).TrimEnd('\0');
-                return new ErlFloat(double.Parse(text, System.Globalization.CultureInfo.InvariantCulture));
+                if (!double.TryParse(text, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var value))
+                    throw new ErlDecodeException($"'{text}' is not a valid float");
+                return new ErlFloat(value);
             }
 
             case TermTags.SmallBig:
                 return ReadBig(ReadByte());
 
             case TermTags.LargeBig:
-                return ReadBig(checked((int)ReadUInt32()));
+                return ReadBig(ReadLength());
 
             case TermTags.Atom:
                 return new ErlAtom(Encoding.Latin1.GetString(Take(ReadUInt16())));
@@ -86,7 +89,7 @@ public ref struct TermDecoder
                 return ReadTuple(ReadByte());
 
             case TermTags.LargeTuple:
-                return ReadTuple(checked((int)ReadUInt32()));
+                return ReadTuple(ReadCount(bytesPerElement: 1));
 
             case TermTags.Nil:
                 return ErlList.Empty;
@@ -102,7 +105,7 @@ public ref struct TermDecoder
 
             case TermTags.List:
             {
-                var len = checked((int)ReadUInt32());
+                var len = ReadCount(bytesPerElement: 1);
                 var items = new ErlTerm[len];
                 for (var i = 0; i < len; i++) items[i] = ReadTerm();
                 var tail = ReadTerm();
@@ -111,19 +114,22 @@ public ref struct TermDecoder
             }
 
             case TermTags.Binary:
-                return new ErlBinary(Take(checked((int)ReadUInt32())).ToArray());
+                return new ErlBinary(Take(ReadLength()).ToArray());
 
             case TermTags.BitBinary:
             {
-                var len = checked((int)ReadUInt32());
+                var len = ReadLength();
                 var bits = ReadByte();
+                if (bits is < 1 or > 8)
+                    throw new ErlDecodeException($"a bitstring claims {bits} trailing bits; 1 to 8 are valid");
                 var data = Take(len).ToArray();
                 return bits == 8 ? new ErlBinary(data) : new ErlBitstring(data, bits);
             }
 
             case TermTags.Map:
             {
-                var arity = checked((int)ReadUInt32());
+                // Two terms per entry, so two bytes is the floor for one.
+                var arity = ReadCount(bytesPerElement: 2);
                 var entries = new KeyValuePair<ErlTerm, ErlTerm>[arity];
                 for (var i = 0; i < arity; i++)
                 {
@@ -170,6 +176,7 @@ public ref struct TermDecoder
             case TermTags.NewerReference:
             {
                 var len = ReadUInt16();
+                Ensure(len, bytesPerElement: 4);
                 var node = ReadAtomName();
                 var creation = ReadUInt32();
                 var ids = new uint[len];
@@ -180,6 +187,7 @@ public ref struct TermDecoder
             case TermTags.NewReference:
             {
                 var len = ReadUInt16();
+                Ensure(len, bytesPerElement: 4);
                 var node = ReadAtomName();
                 var creation = (uint)ReadByte();
                 var ids = new uint[len];
@@ -196,9 +204,9 @@ public ref struct TermDecoder
 
             case TermTags.Export:
             {
-                var mod = (ErlAtom)ReadTerm();
-                var fun = (ErlAtom)ReadTerm();
-                var arity = (ErlInt)ReadTerm();
+                if (ReadTerm() is not ErlAtom mod || ReadTerm() is not ErlAtom fun ||
+                    ReadTerm() is not ErlInt arity)
+                    throw new ErlDecodeException("an export needs a module atom, a function atom and an arity");
                 return new ErlExport(mod, fun, arity.AsInt);
             }
 
@@ -206,7 +214,8 @@ public ref struct TermDecoder
             {
                 // Size covers everything after the tag byte, itself included.
                 var start = _pos - 1;
-                var size = checked((int)ReadUInt32());
+                var size = ReadLength();
+                if (size < 4) throw new ErlDecodeException($"a fun claims a size of {size} bytes");
                 Take(size - 4);
                 return new ErlFun(_data.Slice(start, _pos - start).ToArray());
             }
@@ -215,7 +224,7 @@ public ref struct TermDecoder
             {
                 // No length prefix: walk the structure to find the end.
                 var start = _pos - 1;
-                var numFree = checked((int)ReadUInt32());
+                var numFree = ReadCount(bytesPerElement: 1);
                 ReadTerm(); // Pid
                 ReadTerm(); // Module
                 ReadTerm(); // Index
@@ -254,6 +263,38 @@ public ref struct TermDecoder
         var t = ReadTerm();
         if (t is ErlAtom a) return a.Name;
         throw new ErlDecodeException($"expected an atom for a node name, got {t}");
+    }
+
+    /// <summary>
+    /// Reads an element count and checks it against the bytes actually left.
+    /// <para>
+    /// Without this, a six-byte frame claiming a hundred million element tuple allocates the array
+    /// before discovering the data is not there. Nothing on the wire encodes an element in less
+    /// than a byte, so a count larger than the remaining input cannot be honest.
+    /// </para>
+    /// </summary>
+    private int ReadCount(int bytesPerElement)
+    {
+        var count = ReadLength();
+        Ensure(count, bytesPerElement);
+        return count;
+    }
+
+    /// <summary>Reads a 32-bit length. Anything past int range cannot address real data.</summary>
+    private int ReadLength()
+    {
+        var value = ReadUInt32();
+        if (value > int.MaxValue)
+            throw new ErlDecodeException($"a term claims a length of {value}, which cannot be addressed");
+        return (int)value;
+    }
+
+    private void Ensure(int count, int bytesPerElement)
+    {
+        var remaining = _data.Length - _pos;
+        if (count < 0 || (long)count * bytesPerElement > remaining)
+            throw new ErlDecodeException(
+                $"a term claims {count} elements but only {remaining} bytes remain");
     }
 
     private byte ReadByte()
