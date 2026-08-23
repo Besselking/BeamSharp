@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using BeamSharp.Epmd;
@@ -47,6 +48,23 @@ public sealed class EpmdClientTests : IDisposable
         }));
 
         return port;
+    }
+
+    /// <summary>
+    /// Reads one request the way EPMD frames it: a two byte length, then exactly that many bytes.
+    /// <para>
+    /// Draining with a single inexact read would assume the whole request arrived in one go, which
+    /// is the same assumption that made an earlier version of these tests fail under load.
+    /// </para>
+    /// </summary>
+    private static async Task<byte[]> ReadRequestAsync(NetworkStream stream, CancellationToken ct)
+    {
+        var header = new byte[2];
+        await stream.ReadExactlyAsync(header, ct);
+
+        var body = new byte[BinaryPrimitives.ReadUInt16BigEndian(header)];
+        await stream.ReadExactlyAsync(body, ct);
+        return body;
     }
 
     public void Dispose()
@@ -99,7 +117,7 @@ public sealed class EpmdClientTests : IDisposable
         // Claims a 65535 byte node name and then hangs up.
         var port = StartFakeEpmd(async (stream, ct) =>
         {
-            await stream.ReadAsync(new byte[64], ct);
+            await ReadRequestAsync(stream, ct);
             await stream.WriteAsync(new byte[]
             {
                 119, 0,               // PORT2_RESP, result ok
@@ -120,7 +138,7 @@ public sealed class EpmdClientTests : IDisposable
     {
         var port = StartFakeEpmd(async (stream, ct) =>
         {
-            await stream.ReadAsync(new byte[64], ct);
+            await ReadRequestAsync(stream, ct);
             await stream.WriteAsync(new byte[] { 0xAB, 0xCD }, ct);
         });
 
