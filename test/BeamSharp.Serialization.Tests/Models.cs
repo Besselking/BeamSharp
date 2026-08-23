@@ -80,3 +80,6 @@ public class DuplicateNames
     public string Value { get; set; } = "";
     [ErlProperty("value")] public string Another { get; set; } = "";
 }
+
+/// <summary>Deliberately absent from the generated context, to prove reflection is really off.</summary>
+public record Undeclared(string Name);

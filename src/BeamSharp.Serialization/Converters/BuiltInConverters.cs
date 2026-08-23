@@ -9,16 +9,6 @@ internal static class BuiltInConverters
 {
     private static readonly Dictionary<Type, ErlConverter> Exact = Build();
 
-    /// <summary>Factories for families of types, in priority order.</summary>
-    public static readonly ErlConverterFactory[] Factories =
-    [
-        TermPassthroughFactory.Instance,
-        NullableConverterFactory.Instance,
-        EnumConverterFactory.Instance,
-        TupleConverterFactory.Instance,
-        DictionaryConverterFactory.Instance,
-        CollectionConverterFactory.Instance
-    ];
 
     public static bool TryGet(Type type, out ErlConverter converter) => Exact.TryGetValue(type, out converter!);
 
@@ -78,25 +68,34 @@ internal static class BuiltInConverters
             (t, _) => Guid.Parse(TermRead.Text(t)));
         Add<Uri>((v, _) => new ErlBinary(v.ToString()), (t, _) => new Uri(TermRead.Text(t)));
 
+        // Terms pass through untouched. The set of them is closed, so listing the instantiations
+        // here keeps this reachable without any generic machinery.
+        void Pass<T>() where T : ErlTerm => map[typeof(T)] = new PassthroughConverter<T>();
+
+        Pass<ErlTerm>();
+        Pass<ErlAtom>();
+        Pass<ErlInt>();
+        Pass<ErlFloat>();
+        Pass<ErlBinary>();
+        Pass<ErlBitstring>();
+        Pass<ErlTuple>();
+        Pass<ErlList>();
+        Pass<ErlMap>();
+        Pass<ErlPid>();
+        Pass<ErlPort>();
+        Pass<ErlRef>();
+        Pass<ErlExport>();
+        Pass<ErlFun>();
+
         return map;
     }
 }
 
-/// <summary>Hands <see cref="ErlTerm"/> values through untouched, so raw terms can be embedded.</summary>
-internal sealed class TermPassthroughFactory : ErlConverterFactory
+/// <summary>Hands a term through unchanged, so raw terms can be embedded in an object.</summary>
+internal sealed class PassthroughConverter<T> : ErlConverter<T> where T : ErlTerm
 {
-    public static readonly TermPassthroughFactory Instance = new();
+    public override ErlTerm Write(T value, ErlSerializerOptions options) => value;
 
-    public override bool CanConvert(Type type) => typeof(ErlTerm).IsAssignableFrom(type);
-
-    public override ErlConverter CreateConverter(Type type, ErlSerializerOptions options) =>
-        (ErlConverter)Activator.CreateInstance(typeof(PassthroughConverter<>).MakeGenericType(type))!;
-
-    private sealed class PassthroughConverter<T> : ErlConverter<T> where T : ErlTerm
-    {
-        public override ErlTerm Write(T value, ErlSerializerOptions options) => value;
-
-        public override T Read(ErlTerm term, ErlSerializerOptions options) =>
-            term as T ?? throw TermRead.Mismatch(term, typeof(T).Name);
-    }
+    public override T Read(ErlTerm term, ErlSerializerOptions options) =>
+        term as T ?? throw TermRead.Mismatch(term, typeof(T).Name);
 }

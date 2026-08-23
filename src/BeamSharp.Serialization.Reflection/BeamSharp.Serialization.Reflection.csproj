@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>BeamSharp.Serialization.Reflection</AssemblyName>
+    <RootNamespace>BeamSharp.Serialization.Reflection</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- This assembly is the reflection fallback, so it is deliberately not AOT-compatible. Its
+         single public entry point is annotated, which is how a consumer finds that out. -->
+    <IsAotCompatible>false</IsAotCompatible>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Package">
+    <PackageId>BeamSharp.Serialization.Reflection</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Marijn Besseling</Authors>
+    <Description>
+      The reflection fallback for BeamSharp.Serialization: serializes any type without declaring it
+      first. Convenient during development, and not trim- or AOT-safe, which is exactly why it lives
+      in its own package — an app that does not reference it cannot accidentally depend on it.
+    </Description>
+    <PackageTags>erlang;elixir;beam;otp;serialization;reflection;interop</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/Besselking/BeamSharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Besselking/BeamSharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../BeamSharp.Serialization/BeamSharp.Serialization.csproj" />
+  </ItemGroup>
+
+</Project>

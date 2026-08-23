@@ -20,6 +20,19 @@ jobs:
           dotnet-version: '10.0.x'
       - run: dotnet test --nologo
 
+  aot:
+    # The generated serializer claims to be AOT-safe; this is where that claim is checked rather
+    # than asserted. The publish must also be free of trim and AOT warnings.
+    name: nativeaot
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+      - run: test/run_aot_probe.sh
+
   interop:
     # The point of this library is that a real BEAM node cannot tell the difference,
     # so the interop suite runs against every OTP release we claim to support.

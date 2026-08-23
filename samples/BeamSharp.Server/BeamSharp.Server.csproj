@@ -11,6 +11,8 @@
   <ItemGroup>
     <ProjectReference Include="../../src/BeamSharp/BeamSharp.csproj" />
     <ProjectReference Include="../../src/BeamSharp.Serialization/BeamSharp.Serialization.csproj" />
+    <ProjectReference Include="../../src/BeamSharp.Serialization.Generator/BeamSharp.Serialization.Generator.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

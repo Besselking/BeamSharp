@@ -181,7 +181,7 @@ suite asserts this against a live Elixir node rather than against our own reader
 Naming, key kind, null representation and the rest are configurable through `ErlSerializerOptions`.
 `[ErlProperty]`, `[ErlIgnore]`, `[ErlConvert]` and `[ErlAsAtom]` cover the per-member cases.
 
-### Extending it, and the road to AOT
+### Extending it
 
 There is exactly one extension point, `ErlConverter<T>`:
 
@@ -197,21 +197,89 @@ sealed class MoneyConverter : ErlConverter<Money>
 options.Converters.Add(new MoneyConverter());
 ```
 
-Built-in conversions, the reflection fallback for plain objects, and anything a source generator
-emits are all the same kind of thing. That is deliberate: generated converters do not need a second
-API to slot into, they just get registered ahead of the reflection fallback.
+Built-in conversions, the reflection fallback for plain objects, and everything the source generator
+emits are all the same kind of thing. That is what lets generated code replace reflection without a
+second API.
 
-Reflection is therefore a replaceable default rather than a requirement. Set
-`UseReflection = false` and any type without a registered converter fails at the call site with a
-message naming it, instead of silently depending on metadata a trimmer may have dropped:
+### Packages
+
+| Package | What it is |
+| --- | --- |
+| `BeamSharp` | The node: EPMD, handshake, signals, terms |
+| `BeamSharp.Serialization` | Object mapping and the source generator. No reflection anywhere in it |
+| `BeamSharp.Serialization.Reflection` | The reflection fallback. Opt in by referencing it |
+
+The split is the whole trimming story: the core serializer contains no reflection at all, so there
+is nothing to annotate, suppress or hope the trimmer keeps. An app that does not reference the
+reflection package cannot accidentally depend on it.
+
+### Reflection, when you want it
 
 ```csharp
-var options = new ErlSerializerOptions { UseReflection = false };
-options.Converters.Add(new PersonConverter());   // hand-written today, generated later
+var options = new ErlSerializerOptions().AddReflectionFallback();
+var term = ErlSerializer.Serialize(anything, options);   // or ErlReflection.Default
 ```
 
-The reflection implementation reads members through `PropertyInfo`, which is fine for message-rate
-work and is the part a source generator would make fast as well as AOT-safe.
+That single entry point carries `[RequiresUnreferencedCode]` and `[RequiresDynamicCode]`, so if you
+publish trimmed or AOT you get exactly one warning, at your own call, naming the fix.
+
+### NativeAOT, when you want that instead
+
+List your types on a context and the generator writes the converters at compile time:
+
+```csharp
+[ErlSerializable(typeof(Person))]
+[ErlSerializable(typeof(Order))]
+[ErlSerializable(typeof(Person[]))]      // collections, enums and tuples can be declared directly
+internal partial class AppTerms : ErlSerializerContext;
+
+var term = ErlSerializer.Serialize(person, AppTerms.Default);
+```
+
+A type nobody declared fails at the call site, naming itself and both ways out:
+
+```
+no converter is registered for MyApp.Invoice. Either declare it on a generated
+ErlSerializerContext with [ErlSerializable(typeof(Invoice))], or reference the
+BeamSharp.Serialization.Reflection package and call options.AddReflectionFallback().
+```
+
+The generator also writes out converter instantiations for the member types it reaches — enums,
+`List<T>`, `Dictionary<K,V>`, `T?`, tuples. That matters more than it looks: reaching those through
+`MakeGenericType` leaves the native code for the instantiation unreachable, and the app dies at
+runtime with *"missing native code or metadata"*. Writing `new ErlCollectionConverter<List<Person>,
+Person>()` roots it.
+
+The two can be layered. A context consults its generated converters first, so adding the fallback
+behind one gives you compile-time converters for the hot types and reflection for the rest — useful
+when you are not publishing AOT and just want the speed.
+
+### How the AOT claim is checked
+
+`test/run_aot_probe.sh` publishes a console app with `PublishAot=true`, fails if the publish emits a
+single trim or AOT warning, and runs the native binary. The probe project does not reference the
+reflection package at all, so there is no fallback present that could quietly take over — an
+undeclared type can only fail. CI runs it on every push.
+
+### The generator's contract is equivalence
+
+Generated code must produce *the same terms reflection does*, so the tests compare the two against
+each other rather than each against a separately written expectation — a duplicated description can
+drift, an equivalence check cannot:
+
+```csharp
+Assert.Equal(
+    ErlSerializer.Serialize(value, reflectionOptions),
+    ErlSerializer.Serialize(value, GeneratedContext.Default));
+```
+
+That holds across every shape and every option, because names are resolved when a converter is
+built rather than when it is generated. Errors match too, down to the message.
+
+Diagnostics are compile-time where they can be: `BS1001` (context is not `partial`), `BS1002` (does
+not derive from `ErlSerializerContext`), `BS1003` (no constructor the deserializer could use),
+`BS1004` (a type no converter can be generated for), `BS1005` (`[ErlRecord]` with inherited members,
+whose order is not guaranteed to match).
 
 ## Security
 
@@ -247,6 +315,10 @@ You can set `Visibility = NodeVisibility.Visible`, and `Node.list/0`, `Node.ping
 take part in its distributed lock and sync protocol, and `:global.sync/0` on that peer will hang
 waiting for us. Unless you need to appear in `Node.list/0`, leave the node hidden.
 
+**The core serializer cannot serialize a type it has never been told about.** That is the point of
+the split rather than an oversight: declare it on a context, or add the reflection package. The
+error message says both.
+
 **Not implemented:** the `global` name registry, the distribution atom cache
 (`DFLAG_DIST_HDR_ATOM_CACHE`) and message fragmentation (`DFLAG_FRAGMENTS`) — the latter two are
 negotiated away, which is legal and costs only some bandwidth on repeated atoms. There is no TLS
@@ -268,17 +340,23 @@ src/BeamSharp/
   Networking/  host name resolution
 src/BeamSharp.Serialization/
   Converters/  built-ins, collections, and the reflection fallback for plain objects
+src/BeamSharp.Serialization.Generator/
+               the Roslyn generator, shipped inside the serialization package as an analyzer
+src/BeamSharp.Serialization.Reflection/
+               the reflection fallback, kept apart so an AOT app cannot reach it
 samples/
   BeamSharp.Server   a .NET node for Elixir to call into
   BeamSharp.Client   a .NET node that calls into Elixir
 test/
   BeamSharp.Tests               unit tests over the codec and protocol
-  BeamSharp.Serialization.Tests unit tests over the object mapping
+  BeamSharp.Serialization.Tests unit tests over the object mapping and the generator
+  BeamSharp.Aot.Probe            a NativeAOT console app proving the generated path needs no reflection
   gen_fixtures.escript          regenerates fixtures.txt from a real Erlang runtime
   elixir_client.exs             34 checks driving the .NET node from Elixir
   elixir_structs.exs            the Elixir structs the C# records map onto
   elixir_server.exs             a plain Elixir GenServer for the .NET node to call
   run_integration.sh            runs both directions end to end
+  run_aot_probe.sh              publishes and runs the AOT probe
 ```
 
 ## Testing
@@ -287,7 +365,7 @@ test/
 dotnet test
 ```
 
-139 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
+164 unit tests. The codec ones assert against byte vectors captured from a real Erlang runtime
 (`test/fixtures.txt`, regenerated by `test/gen_fixtures.escript`) rather than against our own
 encoder, so a shared misunderstanding of the format cannot pass.
 
@@ -297,8 +375,14 @@ test/run_integration.sh
 
 Starts the C# node and an Elixir node and runs 34 checks inbound and 11 outbound, covering calls,
 casts, sends, monitors, links, exits, rpc, error propagation, concurrency, and C# objects arriving
-as Elixir structs. Needs `elixir` and
-`epmd` on `PATH`.
+as Elixir structs. Needs `elixir` and `epmd` on `PATH`.
+
+```bash
+test/run_aot_probe.sh
+```
+
+Publishes a console app with `PublishAot=true`, fails if the publish emits a single trim or AOT
+warning, and runs the resulting native binary.
 
 ## Protocol references
 
