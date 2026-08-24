@@ -41,8 +41,10 @@ public sealed class DistConnection : IAsyncDisposable
     /// preserves the order signals were produced in.
     /// </para>
     /// </summary>
+    private const int OutboundCapacity = 4096;
+
     private readonly Channel<ReadOnlyMemory<byte>> _outbound =
-        Channel.CreateBounded<ReadOnlyMemory<byte>>(new BoundedChannelOptions(4096)
+        Channel.CreateBounded<ReadOnlyMemory<byte>>(new BoundedChannelOptions(OutboundCapacity)
         {
             SingleReader = true,
             FullMode = BoundedChannelFullMode.Wait
@@ -85,7 +87,37 @@ public sealed class DistConnection : IAsyncDisposable
     }
 
     /// <summary>Sends a control message with an optional payload term.</summary>
+    /// <remarks>
+    /// Waits for room in the outbound queue, which is the right backpressure for a caller of ours.
+    /// Signals produced while handling an inbound frame must use <see cref="TrySendSignal"/>
+    /// instead — see the note on the queue itself.
+    /// </remarks>
     public async Task SendAsync(ErlTerm control, ErlTerm? payload = null, CancellationToken ct = default)
+    {
+        await EnqueueAsync(EncodeFrame(control, payload), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a signal produced while handling an inbound frame — a noproc DOWN, an unlink ack, an
+    /// exit. Never waits for room.
+    /// </summary>
+    /// <remarks>
+    /// These are answered from the read loop, so waiting here stops us reading, and a peer that has
+    /// stopped reading would then stop us for good. A full queue means this peer has ignored a
+    /// whole queue's worth of what we sent it; there is nothing left to say to it, so the
+    /// connection goes rather than the read loop. Returns false if the frame was dropped for that.
+    /// </remarks>
+    public bool TrySendSignal(ErlTerm control, ErlTerm? payload = null)
+    {
+        if (IsClosed) return false;
+        if (_outbound.Writer.TryWrite(EncodeFrame(control, payload))) return true;
+
+        CloseInternal(new IOException(
+            $"{PeerNode} has not read {OutboundCapacity} queued frames; giving up on the connection"));
+        return false;
+    }
+
+    private static ReadOnlyMemory<byte> EncodeFrame(ErlTerm control, ErlTerm? payload)
     {
         var enc = new TermEncoder(512);
         enc.WriteByte(0);
@@ -96,8 +128,7 @@ public sealed class DistConnection : IAsyncDisposable
         enc.WriteVersionedTerm(control);
         if (payload is not null) enc.WriteVersionedTerm(payload);
         enc.PatchUInt32(0, (uint)(enc.Length - 4));
-
-        await EnqueueAsync(enc.Segment, ct).ConfigureAwait(false);
+        return enc.Segment;
     }
 
     /// <summary>Queues a frame. Returns once it is accepted, not once it reaches the peer.</summary>
@@ -122,7 +153,7 @@ public sealed class DistConnection : IAsyncDisposable
             await foreach (var frame in _outbound.Reader.ReadAllAsync(_cts.Token).ConfigureAwait(false))
             {
                 await _stream.WriteAsync(frame, _cts.Token).ConfigureAwait(false);
-                _lastSentTicks = Environment.TickCount64;
+                Volatile.Write(ref _lastSentTicks, Environment.TickCount64);
             }
         }
         catch (OperationCanceledException) { }
@@ -141,7 +172,7 @@ public sealed class DistConnection : IAsyncDisposable
             while (!_cts.IsCancellationRequested)
             {
                 await Handshake.ReadExactAsync(_stream, header, _cts.Token).ConfigureAwait(false);
-                _lastReceivedTicks = Environment.TickCount64;
+                Volatile.Write(ref _lastReceivedTicks, Environment.TickCount64);
 
                 var length = BinaryPrimitives.ReadUInt32BigEndian(header);
                 if (length == 0) continue; // tick
@@ -150,7 +181,7 @@ public sealed class DistConnection : IAsyncDisposable
 
                 var body = new byte[length];
                 await Handshake.ReadExactAsync(_stream, body, _cts.Token).ConfigureAwait(false);
-                _lastReceivedTicks = Environment.TickCount64;
+                Volatile.Write(ref _lastReceivedTicks, Environment.TickCount64);
 
                 var message = ParseFrame(body);
                 if (message is { } m && OnMessage is { } handler)
@@ -211,8 +242,12 @@ public sealed class DistConnection : IAsyncDisposable
                     return;
                 }
 
+                // Not EnqueueAsync: waiting for room here would stop the watchdog above from
+                // running again, leaving a wedged connection undetected for as long as the peer
+                // cared to leave it. A tick that cannot be queued is not worth waiting for anyway,
+                // with a full queue of unread frames already ahead of it.
                 if (now - Volatile.Read(ref _lastSentTicks) >= interval.TotalMilliseconds)
-                    await EnqueueAsync(new byte[4], _cts.Token).ConfigureAwait(false);
+                    _outbound.Writer.TryWrite(new byte[4]);
             }
         }
         catch (OperationCanceledException) { }
@@ -240,6 +275,7 @@ public sealed class DistConnection : IAsyncDisposable
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return ValueTask.CompletedTask;
 
         _cts.Dispose();
+        _stream.Dispose();
         _client.Dispose();
         return ValueTask.CompletedTask;
     }

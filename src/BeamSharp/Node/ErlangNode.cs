@@ -29,6 +29,10 @@ public sealed class ErlangNode : IAsyncDisposable
     private readonly ConcurrentDictionary<ErlRef, PendingCall> _pendingCalls = new();
     private readonly ConcurrentDictionary<ErlRef, Mailbox> _aliases = new();
     private readonly SemaphoreSlim _connectLock = new(1, 1);
+    private int _handshakesInFlight;
+
+    /// <summary>How long to wait after a failed accept before trying again.</summary>
+    private static readonly TimeSpan AcceptRetryDelay = TimeSpan.FromMilliseconds(100);
     private readonly List<Task> _hostedServers = [];
 
     private TcpListener? _listener;
@@ -122,10 +126,32 @@ public sealed class ErlangNode : IAsyncDisposable
                 client = await _listener!.AcceptTcpClientAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { return; }
+            catch (ObjectDisposedException) { return; }
             catch (Exception ex)
             {
+                // Only a stopped node stops accepting. The registration with EPMD outlives any one
+                // accept error, so abandoning the loop advertises a port nothing answers on: the
+                // node looks alive and every ping times out. Errors like running out of descriptors
+                // pass, and the backoff keeps a permanent one from spinning.
                 Log($"accept failed: {ex.Message}");
-                return;
+                try
+                {
+                    await Task.Delay(AcceptRetryDelay, ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { return; }
+
+                continue;
+            }
+
+            // A handshake costs a task, a timeout, and under TLS an asymmetric-crypto operation,
+            // all of it before the peer has proved it holds the cookie. Refuse past the limit
+            // rather than queueing: a caller that cannot get in now would rather be told.
+            if (Interlocked.Increment(ref _handshakesInFlight) > _options.MaxConcurrentHandshakes)
+            {
+                Interlocked.Decrement(ref _handshakesInFlight);
+                Log("refusing an inbound connection: too many handshakes already in flight");
+                client.Dispose();
+                continue;
             }
 
             _ = Task.Run(async () =>
@@ -154,6 +180,10 @@ public sealed class ErlangNode : IAsyncDisposable
                 {
                     Log($"inbound handshake failed: {ex.Message}");
                     client.Dispose();
+                }
+                finally
+                {
+                    Interlocked.Decrement(ref _handshakesInFlight);
                 }
             }, ct);
         }
@@ -263,14 +293,25 @@ public sealed class ErlangNode : IAsyncDisposable
             NodeDown?.Invoke(c.PeerNode, error);
         };
 
-        if (_connections.TryGetValue(connection.PeerNode, out var existing) && !existing.IsClosed)
+        // Inbound handshakes complete on unsynchronised tasks, so two from one peer can reach here
+        // at once and only the atomic operations say anything true about which won. A connection
+        // dropped from the dictionary without being disposed keeps its read, write and tick loops
+        // running against a socket nobody holds.
+        while (!_connections.TryAdd(connection.PeerNode, connection))
         {
-            // Simultaneous connect: keep the one already established.
-            await connection.DisposeAsync().ConfigureAwait(false);
-            return;
+            if (_connections.TryGetValue(connection.PeerNode, out var existing) && !existing.IsClosed)
+            {
+                // Simultaneous connect: keep the one already established.
+                await connection.DisposeAsync().ConfigureAwait(false);
+                return;
+            }
+
+            // Dead, but its Closed callback may not have run yet. Evict exactly this one, so a live
+            // replacement racing us here is never the casualty.
+            if (existing is not null)
+                _connections.TryRemove(new KeyValuePair<string, DistConnection>(connection.PeerNode, existing));
         }
 
-        _connections[connection.PeerNode] = connection;
         connection.Start();
         Log($"connected to {connection.PeerNode} (flags {connection.Flags})");
         NodeUp?.Invoke(connection.PeerNode);
@@ -317,7 +358,18 @@ public sealed class ErlangNode : IAsyncDisposable
     public Mailbox? Whereis(string name) => _registered.GetValueOrDefault(name);
 
     /// <summary>Closes a mailbox and notifies whoever was linked to or monitoring it.</summary>
-    public async ValueTask CloseMailboxAsync(Mailbox mailbox, ErlTerm reason)
+    /// <remarks>
+    /// Returns once the notifications are queued, not once they are on the wire. This runs on a read
+    /// loop when it is an inbound exit that closed the mailbox, and waiting for a peer to make room
+    /// there is what stops that loop reading.
+    /// </remarks>
+    public ValueTask CloseMailboxAsync(Mailbox mailbox, ErlTerm reason)
+    {
+        CloseMailbox(mailbox, reason);
+        return ValueTask.CompletedTask;
+    }
+
+    private void CloseMailbox(Mailbox mailbox, ErlTerm reason)
     {
         if (!mailbox.MarkClosed()) return;
 
@@ -326,12 +378,12 @@ public sealed class ErlangNode : IAsyncDisposable
             _registered.TryRemove(new KeyValuePair<string, Mailbox>(mailbox.RegisteredName, mailbox));
 
         foreach (var (reference, watcher) in mailbox.IncomingMonitors)
-            await TrySignalAsync(watcher.Node, new ErlTuple(
-                new ErlInt((int)DistOp.MonitorPExit), mailbox.Pid, watcher, reference, reason)).ConfigureAwait(false);
+            TrySignal(watcher.Node, new ErlTuple(
+                new ErlInt((int)DistOp.MonitorPExit), mailbox.Pid, watcher, reference, reason));
 
         foreach (var linked in mailbox.Links.Keys)
-            await TrySignalAsync(linked.Node, new ErlTuple(
-                new ErlInt((int)DistOp.Exit), mailbox.Pid, linked, reason)).ConfigureAwait(false);
+            TrySignal(linked.Node, new ErlTuple(
+                new ErlInt((int)DistOp.Exit), mailbox.Pid, linked, reason));
 
         mailbox.IncomingMonitors.Clear();
         mailbox.Links.Clear();
@@ -399,17 +451,18 @@ public sealed class ErlangNode : IAsyncDisposable
             : SendAsync(from.Caller, message, self, ct);
     }
 
-    private async Task TrySignalAsync(string node, ErlTerm control, ErlTerm? payload = null)
+    /// <summary>
+    /// Sends a signal to whichever connection already has <paramref name="node"/>, if any.
+    /// </summary>
+    /// <remarks>
+    /// Called while handling an inbound frame, and often for a different peer than the one the frame
+    /// came from, so it must not wait for room: otherwise one peer that stops reading wedges the
+    /// read loop of every connection with something to tell it.
+    /// </remarks>
+    private void TrySignal(string node, ErlTerm control, ErlTerm? payload = null)
     {
-        try
-        {
-            if (_connections.TryGetValue(node, out var connection) && !connection.IsClosed)
-                await connection.SendAsync(control, payload, _cts.Token).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            Log($"failed to signal {node}: {ex.Message}");
-        }
+        if (_connections.TryGetValue(node, out var connection) && !connection.IsClosed)
+            connection.TrySendSignal(control, payload);
     }
 
     private void DeliverLocal(ErlPid to, ErlTerm message, ErlPid? from)
@@ -472,8 +525,8 @@ public sealed class ErlangNode : IAsyncDisposable
         finally
         {
             _pendingCalls.TryRemove(tagRef, out _);
-            await TrySignalAsync(node, new ErlTuple(
-                new ErlInt((int)DistOp.DemonitorP), self, target, tagRef)).ConfigureAwait(false);
+            TrySignal(node, new ErlTuple(
+                new ErlInt((int)DistOp.DemonitorP), self, target, tagRef));
         }
     }
 
@@ -559,7 +612,7 @@ public sealed class ErlangNode : IAsyncDisposable
                 break;
 
             case DistOp.MonitorP:
-                await HandleMonitorAsync(connection, control).ConfigureAwait(false);
+                HandleMonitor(connection, control);
                 break;
 
             case DistOp.DemonitorP:
@@ -577,7 +630,7 @@ public sealed class ErlangNode : IAsyncDisposable
                 break;
 
             case DistOp.Link:
-                await HandleLinkAsync(control).ConfigureAwait(false);
+                HandleLink(control);
                 break;
 
             case DistOp.UnlinkOld:
@@ -587,20 +640,19 @@ public sealed class ErlangNode : IAsyncDisposable
                 break;
 
             case DistOp.UnlinkId:
-                await HandleUnlinkIdAsync(connection, control).ConfigureAwait(false);
+                HandleUnlinkId(connection, control);
                 break;
 
             case DistOp.UnlinkIdAck:
                 break; // nothing to undo: we drop the link as soon as we send UNLINK_ID
 
             case DistOp.Exit or DistOp.Exit2 or DistOp.ExitTt or DistOp.Exit2Tt:
-                await HandleExitAsync(control[2], control[1],
-                    control.Arity > 3 ? control[3] : ErlAtom.Normal).ConfigureAwait(false);
+                HandleExit(control[2], control[1],
+                    control.Arity > 3 ? control[3] : ErlAtom.Normal);
                 break;
 
             case DistOp.PayloadExit or DistOp.PayloadExit2 or DistOp.PayloadExitTt or DistOp.PayloadExit2Tt:
-                await HandleExitAsync(control[2], control[1],
-                    message.Payload ?? ErlAtom.Normal).ConfigureAwait(false);
+                HandleExit(control[2], control[1], message.Payload ?? ErlAtom.Normal);
                 break;
 
             case DistOp.SpawnRequest or DistOp.SpawnRequestTt:
@@ -683,7 +735,7 @@ public sealed class ErlangNode : IAsyncDisposable
         }
     }
 
-    private async Task HandleMonitorAsync(DistConnection connection, ErlTuple control)
+    private void HandleMonitor(DistConnection connection, ErlTuple control)
     {
         if (control[1] is not ErlPid watcher || control[3] is not ErlRef reference) return;
 
@@ -697,9 +749,8 @@ public sealed class ErlangNode : IAsyncDisposable
         if (target is null || target.IsClosed)
         {
             // Exactly what makes GenServer.call to a missing name fail fast instead of hanging.
-            await connection.SendAsync(new ErlTuple(
-                    new ErlInt((int)DistOp.MonitorPExit), control[2], watcher, reference, ErlAtom.NoProc))
-                .ConfigureAwait(false);
+            connection.TrySendSignal(new ErlTuple(
+                new ErlInt((int)DistOp.MonitorPExit), control[2], watcher, reference, ErlAtom.NoProc));
             return;
         }
 
@@ -713,38 +764,38 @@ public sealed class ErlangNode : IAsyncDisposable
                 return;
     }
 
-    private async Task HandleLinkAsync(ErlTuple control)
+    private void HandleLink(ErlTuple control)
     {
         if (control[1] is not ErlPid from || control[2] is not ErlPid toPid) return;
 
         if (_mailboxes.TryGetValue(toPid, out var mailbox) && !mailbox.IsClosed)
             mailbox.Links[from] = 0;
         else
-            await TrySignalAsync(from.Node, new ErlTuple(
-                new ErlInt((int)DistOp.Exit), toPid, from, ErlAtom.NoProc)).ConfigureAwait(false);
+            TrySignal(from.Node, new ErlTuple(
+                new ErlInt((int)DistOp.Exit), toPid, from, ErlAtom.NoProc));
     }
 
-    private async Task HandleUnlinkIdAsync(DistConnection connection, ErlTuple control)
+    private void HandleUnlinkId(DistConnection connection, ErlTuple control)
     {
         // {35, Id, FromPid, ToPid}; the ack echoes all three back.
         if (control.Arity < 4 || control[2] is not ErlPid from || control[3] is not ErlPid toPid) return;
 
         if (_mailboxes.TryGetValue(toPid, out var mailbox)) mailbox.Links.TryRemove(from, out _);
 
-        await connection.SendAsync(new ErlTuple(
-            new ErlInt((int)DistOp.UnlinkIdAck), control[1], from, toPid)).ConfigureAwait(false);
+        connection.TrySendSignal(new ErlTuple(
+            new ErlInt((int)DistOp.UnlinkIdAck), control[1], from, toPid));
     }
 
-    private async Task HandleExitAsync(ErlTerm toTerm, ErlTerm fromTerm, ErlTerm reason)
+    private void HandleExit(ErlTerm toTerm, ErlTerm fromTerm, ErlTerm reason)
     {
         if (toTerm is not ErlPid toPid || !_mailboxes.TryGetValue(toPid, out var mailbox)) return;
 
-        mailbox.Links.TryRemove(fromTerm as ErlPid ?? new ErlPid("", 0, 0, 0), out _);
+        if (fromTerm is ErlPid fromPid) mailbox.Links.TryRemove(fromPid, out _);
 
         if (mailbox.TrapExit)
             mailbox.TryDeliver(new ErlTuple(new ErlAtom("EXIT"), fromTerm, reason), fromTerm as ErlPid);
         else if (!reason.IsAtom("normal"))
-            await CloseMailboxAsync(mailbox, reason).ConfigureAwait(false);
+            CloseMailbox(mailbox, reason);
     }
 
     // -------------------------------------------------------- spawn requests
