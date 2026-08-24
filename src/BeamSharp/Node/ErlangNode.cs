@@ -54,8 +54,7 @@ public sealed class ErlangNode : IAsyncDisposable
 
     private TcpListener? _listener;
     private int _disposed;
-    private uint _pidId;
-    private uint _pidSerial;
+    private long _pidCounter;
     private long _refCounter;
     private int _started;
 
@@ -799,14 +798,9 @@ public sealed class ErlangNode : IAsyncDisposable
             return;
         }
 
-        // A monitor a mailbox set itself: hand it the standard 'DOWN' tuple.
-        foreach (var mailbox in _mailboxes.Values)
-        {
-            if (!mailbox.IncomingMonitors.ContainsKey(reference)) continue;
-            mailbox.TryDeliver(new ErlTuple(
-                new ErlAtom("DOWN"), reference, new ErlAtom("process"), monitored, reason), null);
-            return;
-        }
+        // Nothing else here watches a remote process. IncomingMonitors holds the monitors peers set
+        // on us, which are the ones we send a DOWN for rather than receive one about, so a DOWN
+        // matching no pending call concerns nothing on this node.
     }
 
     private void HandleMonitor(DistConnection connection, ErlTuple control)
@@ -887,11 +881,19 @@ public sealed class ErlangNode : IAsyncDisposable
         if (control.Arity < 6 || control[1] is not ErlRef reqId || control[2] is not ErlPid from) return;
 
         var options = control[5] as ErlList ?? ErlList.Empty;
-        var wantsMonitor = options.Items.ToArray().Any(o => o.IsAtom("monitor"));
-        var wantsLink = options.Items.ToArray().Any(o => o.IsAtom("link"));
-        var replyMode = options.Items.ToArray()
-            .Select(o => o.IsTagged("reply", out var t) && t.Arity == 2 ? t[1].ToString() : null)
-            .FirstOrDefault(v => v is not null) ?? "yes";
+        var wantsMonitor = false;
+        var wantsLink = false;
+        string? replyMode = null;
+
+        foreach (var option in options.Items)
+        {
+            if (option.IsAtom("monitor")) wantsMonitor = true;
+            else if (option.IsAtom("link")) wantsLink = true;
+            else if (replyMode is null && option.IsTagged("reply", out var reply) && reply.Arity == 2)
+                replyMode = reply[1].ToString();
+        }
+
+        replyMode ??= "yes";
 
         var mfa = control[4] as ErlTuple;
         var args = (payload as ErlList)?.ToArray() ?? [];
@@ -974,9 +976,12 @@ public sealed class ErlangNode : IAsyncDisposable
     /// <summary>Allocates a fresh pid on this node.</summary>
     public ErlPid NextPid()
     {
-        var id = Interlocked.Increment(ref _pidId);
-        if (id == 0) Interlocked.Increment(ref _pidSerial);
-        return new ErlPid(Name.Full, id, Volatile.Read(ref _pidSerial), Creation);
+        // One 64-bit counter split at the point of use, so the id and the serial that go into a pid
+        // are always the pair this call was handed. Reading the serial separately let a rollover in
+        // another caller land between the two, giving one id two serials -- or worse, two callers
+        // the same pid.
+        var n = (ulong)Interlocked.Increment(ref _pidCounter);
+        return new ErlPid(Name.Full, (uint)n, (uint)(n >> 32), Creation);
     }
 
     /// <summary>Allocates a fresh reference on this node.</summary>
