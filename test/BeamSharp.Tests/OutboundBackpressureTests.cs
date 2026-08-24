@@ -1,6 +1,6 @@
-using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading.Channels;
 using BeamSharp.Protocol;
 using BeamSharp.Terms;
 using Xunit;
@@ -15,7 +15,7 @@ namespace BeamSharp.Tests;
 public sealed class OutboundBackpressureTests
 {
     /// <summary>A UNLINK_ID control frame, which obliges us to send an ack back.</summary>
-    private static byte[] UnlinkFrame(uint id)
+    private static byte[] UnlinkFrame()
     {
         var enc = new TermEncoder(256);
         enc.WriteByte(0);
@@ -25,8 +25,8 @@ public sealed class OutboundBackpressureTests
         enc.WriteByte(112); // PASS_THROUGH
         enc.WriteVersionedTerm(new ErlTuple(
             new ErlInt((int)DistOp.UnlinkId),
-            new ErlInt(id),
-            new ErlPid("flood@nowhere", id, 0, 1),
+            new ErlInt(1),
+            new ErlPid("flood@nowhere", 1, 0, 1),
             new ErlPid("victim@nowhere", 1, 0, 1)));
         enc.PatchUInt32(0, (uint)(enc.Length - 4));
         return enc.Segment.ToArray();
@@ -35,21 +35,25 @@ public sealed class OutboundBackpressureTests
     [Fact]
     public async Task A_peer_that_never_reads_our_acks_does_not_wedge_the_read_loop()
     {
+        // Deliberately not a real socket on both ends. Whether the outbound queue fills would then
+        // depend on how much the kernel is willing to buffer, which differs by platform and by
+        // tuning -- this failed on Linux and passed on macOS for exactly that reason. A stream whose
+        // writes never complete puts the queue in the state under test on every machine.
+        using var choked = new ChokedStream();
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
-
-        // The flooding peer: it writes and never once reads, so our acks pile up in its receive
-        // window, then in our socket buffer, then in the outbound queue.
         using var peer = new TcpClient();
         await peer.ConnectAsync((IPEndPoint)listener.LocalEndpoint);
         using var accepted = await listener.AcceptTcpClientAsync();
 
-        var connection = new DistConnection(accepted, accepted.GetStream(),
+        var connection = new DistConnection(accepted, choked,
             new HandshakeResult("flood@nowhere", DistributionFlags.Default, 1), TimeSpan.FromSeconds(60));
 
+        var handled = 0;
         connection.OnMessage = (_, _) =>
         {
             // Stand in for the dispatcher: answer every inbound signal, as the real handlers do.
+            Interlocked.Increment(ref handled);
             connection.TrySendSignal(new ErlTuple(
                 new ErlInt((int)DistOp.UnlinkIdAck),
                 new ErlInt(1),
@@ -59,32 +63,18 @@ public sealed class OutboundBackpressureTests
         };
         connection.Start();
 
-        var frame = UnlinkFrame(1);
-        var peerStream = peer.GetStream();
+        // Comfortably past what the queue holds, since nothing can drain it.
+        var frame = UnlinkFrame();
+        for (var i = 0; i < 6000; i++) choked.Deliver(frame);
 
-        // Comfortably more than the outbound queue holds. Before the fix this loop ran until the
-        // socket buffers filled and then blocked here for good, because the far side had stopped
-        // reading its own inbound frames: our read loop was parked inside EnqueueAsync.
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-        var flooded = 0;
-        try
-        {
-            for (; flooded < 20_000; flooded++)
-                await peerStream.WriteAsync(frame, deadline.Token);
-        }
-        catch (OperationCanceledException)
-        {
-            Assert.Fail($"writing stopped making progress after {flooded:N0} signals: the read loop is wedged");
-        }
-        catch (IOException)
-        {
-            // The connection gave up on us, which is the intended outcome: see below.
-        }
+        // Before the fix the read loop parked inside EnqueueAsync at frame 4,097 and stayed there:
+        // no close, no log, no tick, and the watchdog blocked in the same place.
+        var closed = SpinWait.SpinUntil(() => connection.IsClosed, TimeSpan.FromSeconds(15));
+        Assert.True(closed,
+            $"the read loop stopped after {Volatile.Read(ref handled):N0} signals and the connection stayed open");
 
-        // The peer ignored everything we sent it, so the connection is the thing that goes -- not
-        // the read loop, and not silently.
-        var closed = SpinWait.SpinUntil(() => connection.IsClosed, TimeSpan.FromSeconds(10));
-        Assert.True(closed, "the connection stayed open with a peer that had stopped reading");
+        // And it got far enough to fill the queue rather than dying early for some other reason.
+        Assert.True(handled > 4000, $"only {handled:N0} signals were handled before the connection closed");
 
         await connection.DisposeAsync();
     }
@@ -112,5 +102,64 @@ public sealed class OutboundBackpressureTests
         Assert.InRange(sent, 1, 8192);
 
         await connection.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Serves queued frames to the reader and never finishes a write, which is what a peer whose
+    /// receive window has closed looks like from this side -- without depending on a real one.
+    /// </summary>
+    private sealed class ChokedStream : Stream
+    {
+        private readonly Channel<byte[]> _inbound = Channel.CreateUnbounded<byte[]>();
+        private readonly CancellationTokenSource _disposed = new();
+        private ReadOnlyMemory<byte> _current;
+
+        public void Deliver(byte[] frame) => _inbound.Writer.TryWrite(frame);
+
+        public override bool CanRead => true;
+        public override bool CanWrite => true;
+        public override bool CanSeek => false;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposed.Token);
+            while (_current.IsEmpty)
+                _current = await _inbound.Reader.ReadAsync(linked.Token).ConfigureAwait(false);
+
+            var take = Math.Min(buffer.Length, _current.Length);
+            _current[..take].CopyTo(buffer);
+            _current = _current[take..];
+            return take;
+        }
+
+        public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken ct = default)
+        {
+            // The whole point: this never completes, so nothing drains the outbound queue.
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposed.Token);
+            await Task.Delay(Timeout.Infinite, linked.Token).ConfigureAwait(false);
+        }
+
+        private int _disposeCount;
+
+        protected override void Dispose(bool disposing)
+        {
+            // DistConnection.DisposeAsync now disposes its stream, and the test holds one too, so
+            // this is called twice on purpose.
+            if (disposing && Interlocked.Exchange(ref _disposeCount, 1) == 0)
+            {
+                _disposed.Cancel();
+                _disposed.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() { }
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => 0; set => throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
     }
 }
