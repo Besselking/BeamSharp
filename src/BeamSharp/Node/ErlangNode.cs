@@ -29,7 +29,19 @@ public sealed class ErlangNode : IAsyncDisposable
     private readonly ConcurrentDictionary<ErlRef, PendingCall> _pendingCalls = new();
     private readonly ConcurrentDictionary<string, Exception> _lastConnectFailures = new();
     private readonly ConcurrentDictionary<ErlRef, Mailbox> _aliases = new();
-    private readonly SemaphoreSlim _connectLock = new(1, 1);
+    /// <summary>
+    /// One dialling permit per peer, so a peer that cannot be reached delays only the callers
+    /// waiting on that peer.
+    /// </summary>
+    /// <remarks>
+    /// A dial holds its permit across an EPMD lookup, a TCP connect, a TLS handshake and the
+    /// distribution handshake, which together can take the EPMD timeout plus the handshake timeout.
+    /// One permit for the whole node would make every one of those wait behind an unreachable peer.
+    /// Entries are per distinct name dialled and are not removed: releasing one that another caller
+    /// is about to take would let two dials at the same peer run at once, which is the race the
+    /// permit exists to stop.
+    /// </remarks>
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectLocks = new(StringComparer.Ordinal);
     private readonly string _cookieSource;
     private readonly string? _cookieWarning;
     private int _handshakesInFlight;
@@ -214,7 +226,8 @@ public sealed class ErlangNode : IAsyncDisposable
     {
         if (_connections.ContainsKey(peerNode)) return true;
 
-        await _connectLock.WaitAsync(ct).ConfigureAwait(false);
+        var connectLock = _connectLocks.GetOrAdd(peerNode, static _ => new SemaphoreSlim(1, 1));
+        await connectLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             if (_connections.ContainsKey(peerNode)) return true;
@@ -264,7 +277,7 @@ public sealed class ErlangNode : IAsyncDisposable
         }
         finally
         {
-            _connectLock.Release();
+            connectLock.Release();
         }
     }
 
@@ -993,7 +1006,8 @@ public sealed class ErlangNode : IAsyncDisposable
         _connections.Clear();
 
         await _epmd.DisposeAsync().ConfigureAwait(false);
-        _connectLock.Dispose();
+        foreach (var connectLock in _connectLocks.Values) connectLock.Dispose();
+        _connectLocks.Clear();
         _cts.Dispose();
     }
 }

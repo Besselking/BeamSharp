@@ -15,7 +15,9 @@ public sealed class BeamSharpNodeService : IHostedService, IAsyncDisposable
     private readonly ILogger<BeamSharpNodeService> _logger;
     private readonly BeamSharpMetrics _metrics;
     private readonly IEnumerable<IErlangNodeConfigurator> _configurators;
+    private readonly CancellationTokenSource _stopping = new();
     private ErlangNode? _node;
+    private Task? _joining;
 
     public BeamSharpNodeService(
         IOptions<BeamSharpOptions> options,
@@ -62,20 +64,57 @@ public sealed class BeamSharpNodeService : IHostedService, IAsyncDisposable
         await _node.StartAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation("node {Node} listening on port {Port}", _node.Name, _node.Port);
 
-        foreach (var peer in _options.ConnectTo)
+        // An IHostedService that has not returned holds up everything started after it, and dialling
+        // a peer can take the EPMD timeout plus the handshake timeout. A peer that is not up yet is
+        // an ordinary state for a cluster to be in -- one member has to start first -- so joining
+        // happens alongside the application rather than in front of it.
+        _joining = Task.Run(() => ConnectToPeersAsync(_node, _stopping.Token), CancellationToken.None);
+    }
+
+    private async Task ConnectToPeersAsync(ErlangNode node, CancellationToken ct)
+    {
+        await Parallel.ForEachAsync(_options.ConnectTo, ct, async (peer, token) =>
         {
-            if (await _node.ConnectAsync(peer, cancellationToken).ConfigureAwait(false)) continue;
-            _logger.LogWarning("could not reach {Peer} at startup", peer);
-        }
+            try
+            {
+                if (await node.ConnectAsync(peer, token).ConfigureAwait(false)) return;
+                _logger.LogWarning("could not reach {Peer} at startup", peer);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // Shutting down before the cluster finished forming is not a fault.
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "could not reach {Peer} at startup", peer);
+            }
+        }).ConfigureAwait(false);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         if (_node is null) return;
 
+        // Stop dialling before disposing the node the dials are using.
+        await _stopping.CancelAsync().ConfigureAwait(false);
+        if (_joining is { } joining)
+        {
+            try
+            {
+                await joining.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected: that is what cancelling it does.
+            }
+
+            _joining = null;
+        }
+
         _logger.LogInformation("stopping node {Node}", _node.Name);
         await _node.DisposeAsync().ConfigureAwait(false);
         _node = null;
+        _stopping.Dispose();
     }
 
     public async ValueTask DisposeAsync()
