@@ -120,23 +120,39 @@ public sealed class ErlFloat : ErlTerm
 /// <summary>An Erlang binary — Elixir's string type.</summary>
 public sealed class ErlBinary : ErlTerm
 {
-    public byte[] Data { get; }
+    private readonly byte[] _data;
 
-    public ErlBinary(byte[] data) => Data = data ?? throw new ArgumentNullException(nameof(data));
-    public ErlBinary(string utf8) => Data = Encoding.UTF8.GetBytes(utf8);
+    /// <summary>
+    /// The bytes. Read-only: a term is a value, and these are hashed and compared, so a term whose
+    /// bytes can change underneath a dictionary is one that goes missing from it.
+    /// </summary>
+    public ReadOnlyMemory<byte> Data => _data;
 
-    public int Length => Data.Length;
+    /// <summary>The bytes without going through <see cref="ReadOnlyMemory{T}"/>, which the encoder
+    /// walks often enough to notice the difference.</summary>
+    internal ReadOnlySpan<byte> Bytes => _data;
+
+    public ErlBinary(ReadOnlySpan<byte> data) => _data = data.ToArray();
+    public ErlBinary(byte[] data) => _data = (data ?? throw new ArgumentNullException(nameof(data))).AsSpan().ToArray();
+    public ErlBinary(string utf8) => _data = Encoding.UTF8.GetBytes(utf8);
+
+    private ErlBinary(byte[] data, bool owned) => _data = data;
+
+    /// <summary>Wraps an array nobody else holds, for callers that just built one.</summary>
+    internal static ErlBinary FromOwned(byte[] data) => new(data, owned: true);
+
+    public int Length => _data.Length;
 
     /// <summary>Decodes the binary as UTF-8, which is how Elixir strings are represented.</summary>
-    public string AsString() => Encoding.UTF8.GetString(Data);
+    public string AsString() => Encoding.UTF8.GetString(_data);
 
-    public override bool Equals(ErlTerm? other) => other is ErlBinary b && b.Data.AsSpan().SequenceEqual(Data);
+    public override bool Equals(ErlTerm? other) => other is ErlBinary b && b._data.AsSpan().SequenceEqual(_data);
 
     public override int GetHashCode()
     {
         var hc = new HashCode();
         hc.Add(nameof(ErlBinary));
-        hc.AddBytes(Data);
+        hc.AddBytes(_data);
         return hc.ToHashCode();
     }
 
@@ -149,30 +165,47 @@ public sealed class ErlBinary : ErlTerm
 /// <summary>A bitstring whose length is not a whole number of bytes.</summary>
 public sealed class ErlBitstring : ErlTerm
 {
+    private readonly byte[] _data;
+
     /// <summary>Backing bytes; the final byte is left-aligned and holds <see cref="TrailingBits"/> significant bits.</summary>
-    public byte[] Data { get; }
+    public ReadOnlyMemory<byte> Data => _data;
+
+    internal ReadOnlySpan<byte> Bytes => _data;
 
     /// <summary>Number of significant bits in the last byte, 1..8.</summary>
     public int TrailingBits { get; }
 
-    public ErlBitstring(byte[] data, int trailingBits)
+    public ErlBitstring(ReadOnlySpan<byte> data, int trailingBits)
     {
         if (trailingBits is < 1 or > 8) throw new ArgumentOutOfRangeException(nameof(trailingBits));
-        Data = data;
+        _data = data.ToArray();
         TrailingBits = trailingBits;
     }
 
-    public long BitLength => Data.Length == 0 ? 0 : (long)(Data.Length - 1) * 8 + TrailingBits;
+    public ErlBitstring(byte[] data, int trailingBits)
+        : this((data ?? throw new ArgumentNullException(nameof(data))).AsSpan(), trailingBits) { }
+
+    private ErlBitstring(byte[] data, int trailingBits, bool owned)
+    {
+        if (trailingBits is < 1 or > 8) throw new ArgumentOutOfRangeException(nameof(trailingBits));
+        _data = data;
+        TrailingBits = trailingBits;
+    }
+
+    /// <summary>Wraps an array nobody else holds, for callers that just built one.</summary>
+    internal static ErlBitstring FromOwned(byte[] data, int trailingBits) => new(data, trailingBits, owned: true);
+
+    public long BitLength => _data.Length == 0 ? 0 : (long)(_data.Length - 1) * 8 + TrailingBits;
 
     public override bool Equals(ErlTerm? other) =>
-        other is ErlBitstring b && b.TrailingBits == TrailingBits && b.Data.AsSpan().SequenceEqual(Data);
+        other is ErlBitstring b && b.TrailingBits == TrailingBits && b._data.AsSpan().SequenceEqual(_data);
 
     public override int GetHashCode()
     {
         var hc = new HashCode();
         hc.Add(nameof(ErlBitstring));
         hc.Add(TrailingBits);
-        hc.AddBytes(Data);
+        hc.AddBytes(_data);
         return hc.ToHashCode();
     }
 
@@ -401,19 +434,41 @@ public sealed class ErlPort : ErlTerm
 /// <summary>A reference — also what an Elixir <c>alias</c> is made of.</summary>
 public sealed class ErlRef : ErlTerm
 {
-    public ErlRef(string node, uint creation, uint[] ids)
+    private readonly uint[] _ids;
+
+    public ErlRef(string node, uint creation, ReadOnlySpan<uint> ids)
     {
         Node = node;
         Creation = creation;
-        Ids = ids;
+        _ids = ids.ToArray();
     }
+
+    public ErlRef(string node, uint creation, uint[] ids)
+        : this(node, creation, (ids ?? throw new ArgumentNullException(nameof(ids))).AsSpan()) { }
+
+    private ErlRef(string node, uint creation, uint[] ids, bool owned)
+    {
+        Node = node;
+        Creation = creation;
+        _ids = ids;
+    }
+
+    /// <summary>Wraps an array nobody else holds, for callers that just built one.</summary>
+    internal static ErlRef FromOwned(string node, uint creation, uint[] ids) => new(node, creation, ids, owned: true);
 
     public string Node { get; }
     public uint Creation { get; }
-    public uint[] Ids { get; }
+
+    /// <summary>
+    /// The reference words. Read-only: this type keys the node's pending calls and monitors, so a
+    /// reference whose words can change is one whose entry can never be found again.
+    /// </summary>
+    public ReadOnlyMemory<uint> Ids => _ids;
+
+    internal ReadOnlySpan<uint> Words => _ids;
 
     public override bool Equals(ErlTerm? other) =>
-        other is ErlRef r && r.Node == Node && r.Creation == Creation && r.Ids.AsSpan().SequenceEqual(Ids);
+        other is ErlRef r && r.Node == Node && r.Creation == Creation && r._ids.AsSpan().SequenceEqual(_ids);
 
     public override int GetHashCode()
     {
@@ -421,12 +476,12 @@ public sealed class ErlRef : ErlTerm
         hc.Add(nameof(ErlRef));
         hc.Add(Node);
         hc.Add(Creation);
-        foreach (var i in Ids) hc.Add(i);
+        foreach (var i in _ids) hc.Add(i);
         return hc.ToHashCode();
     }
 
     internal override void Format(StringBuilder sb) => sb.Append("#Ref<").Append(Node).Append('.')
-        .AppendJoin('.', Ids).Append('>');
+        .AppendJoin('.', _ids).Append('>');
 }
 
 /// <summary>An external function reference such as <c>fun lists:reverse/1</c>.</summary>
@@ -457,18 +512,30 @@ public sealed class ErlExport : ErlTerm
 /// </summary>
 public sealed class ErlFun : ErlTerm
 {
-    public ErlFun(byte[] encoded) => Encoded = encoded;
+    private readonly byte[] _encoded;
+
+    public ErlFun(ReadOnlySpan<byte> encoded) => _encoded = encoded.ToArray();
+
+    public ErlFun(byte[] encoded)
+        : this((encoded ?? throw new ArgumentNullException(nameof(encoded))).AsSpan()) { }
+
+    private ErlFun(byte[] encoded, bool owned) => _encoded = encoded;
+
+    /// <summary>Wraps an array nobody else holds, for callers that just built one.</summary>
+    internal static ErlFun FromOwned(byte[] encoded) => new(encoded, owned: true);
 
     /// <summary>The complete external representation, including the leading tag byte.</summary>
-    public byte[] Encoded { get; }
+    public ReadOnlyMemory<byte> Encoded => _encoded;
 
-    public override bool Equals(ErlTerm? other) => other is ErlFun f && f.Encoded.AsSpan().SequenceEqual(Encoded);
+    internal ReadOnlySpan<byte> Bytes => _encoded;
+
+    public override bool Equals(ErlTerm? other) => other is ErlFun f && f._encoded.AsSpan().SequenceEqual(_encoded);
 
     public override int GetHashCode()
     {
         var hc = new HashCode();
         hc.Add(nameof(ErlFun));
-        hc.AddBytes(Encoded);
+        hc.AddBytes(_encoded);
         return hc.ToHashCode();
     }
 
