@@ -44,7 +44,7 @@ internal static class BuiltInConverters
         // Raw bytes stay a binary rather than becoming a list of integers.
         Add<byte[]>((v, _) => new ErlBinary(v), (t, _) => t switch
         {
-            ErlBinary b => b.Data,
+            ErlBinary b => b.Data.ToArray(),
             ErlList l when l.IsByteList => l.Items.ToArray().Select(i => (byte)(int)((ErlInt)i).Value).ToArray(),
             _ => throw TermRead.Mismatch(t, "a binary")
         });

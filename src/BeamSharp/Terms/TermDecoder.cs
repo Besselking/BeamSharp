@@ -151,7 +151,7 @@ public ref struct TermDecoder
             }
 
             case TermTags.Binary:
-                return new ErlBinary(Take(ReadLength()).ToArray());
+                return ErlBinary.FromOwned(Take(ReadLength()).ToArray());
 
             case TermTags.BitBinary:
             {
@@ -160,7 +160,7 @@ public ref struct TermDecoder
                 if (bits is < 1 or > 8)
                     throw new ErlDecodeException($"a bitstring claims {bits} trailing bits; 1 to 8 are valid");
                 var data = Take(len).ToArray();
-                return bits == 8 ? new ErlBinary(data) : new ErlBitstring(data, bits);
+                return bits == 8 ? ErlBinary.FromOwned(data) : ErlBitstring.FromOwned(data, bits);
             }
 
             case TermTags.Map:
@@ -218,7 +218,7 @@ public ref struct TermDecoder
                 var creation = ReadUInt32();
                 var ids = new uint[len];
                 for (var i = 0; i < len; i++) ids[i] = ReadUInt32();
-                return new ErlRef(node, creation, ids);
+                return ErlRef.FromOwned(node, creation, ids);
             }
 
             case TermTags.NewReference:
@@ -229,7 +229,7 @@ public ref struct TermDecoder
                 var creation = (uint)ReadByte();
                 var ids = new uint[len];
                 for (var i = 0; i < len; i++) ids[i] = ReadUInt32();
-                return new ErlRef(node, creation, ids);
+                return ErlRef.FromOwned(node, creation, ids);
             }
 
             case TermTags.Reference:
@@ -259,7 +259,7 @@ public ref struct TermDecoder
                 var size = ReadLength();
                 if (size < 4) throw new ErlDecodeException($"a fun claims a size of {size} bytes");
                 Take(size - 4);
-                return new ErlFun(_data.Slice(start, _pos - start).ToArray());
+                return ErlFun.FromOwned(_data.Slice(start, _pos - start).ToArray());
             }
 
             case TermTags.Fun:
@@ -272,7 +272,7 @@ public ref struct TermDecoder
                 ReadTerm(); // Index
                 ReadTerm(); // Uniq
                 for (var i = 0; i < numFree; i++) ReadTerm();
-                return new ErlFun(_data.Slice(start, _pos - start).ToArray());
+                return ErlFun.FromOwned(_data.Slice(start, _pos - start).ToArray());
             }
 
             case TermTags.AtomCacheRef:

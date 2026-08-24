@@ -98,15 +98,15 @@ public sealed class TermEncoder
 
             case ErlBinary b:
                 WriteByte(TermTags.Binary);
-                WriteUInt32((uint)b.Data.Length);
-                WriteBytes(b.Data);
+                WriteUInt32((uint)b.Bytes.Length);
+                WriteBytes(b.Bytes);
                 break;
 
             case ErlBitstring bs:
                 WriteByte(TermTags.BitBinary);
-                WriteUInt32((uint)bs.Data.Length);
+                WriteUInt32((uint)bs.Bytes.Length);
                 WriteByte((byte)bs.TrailingBits);
-                WriteBytes(bs.Data);
+                WriteBytes(bs.Bytes);
                 break;
 
             case ErlTuple t:
@@ -154,10 +154,10 @@ public sealed class TermEncoder
 
             case ErlRef r:
                 WriteByte(TermTags.NewerReference);
-                WriteUInt16((ushort)r.Ids.Length);
+                WriteUInt16((ushort)r.Words.Length);
                 WriteAtom(r.Node);
                 WriteUInt32(r.Creation);
-                foreach (var id in r.Ids) WriteUInt32(id);
+                foreach (var id in r.Words) WriteUInt32(id);
                 break;
 
             case ErlExport ex:
@@ -168,7 +168,7 @@ public sealed class TermEncoder
                 break;
 
             case ErlFun fn:
-                WriteBytes(fn.Encoded);
+                WriteBytes(fn.Bytes);
                 break;
 
             default:

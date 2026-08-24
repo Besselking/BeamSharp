@@ -70,11 +70,11 @@ public sealed class PeerScopedSignalTests : IDisposable
 
         // A counter in two of the three words shows up as one stepping by one and the other never
         // moving, which is what these two assertions are watching for.
-        Assert.Equal(64, refs.Select(r => r.Ids[0]).Distinct().Count());
-        Assert.Equal(64, refs.Select(r => r.Ids[1]).Distinct().Count());
+        Assert.Equal(64, refs.Select(r => r.Ids.Span[0]).Distinct().Count());
+        Assert.Equal(64, refs.Select(r => r.Ids.Span[1]).Distinct().Count());
 
         // The emulator masks the low word of a reference it creates to 18 bits.
-        Assert.All(refs, r => Assert.True(r.Ids[0] <= 0x3FFFF, $"word 0 was {r.Ids[0]:X}"));
+        Assert.All(refs, r => Assert.True(r.Ids.Span[0] <= 0x3FFFF, $"word 0 was {r.Ids.Span[0]:X}"));
 
         // Still all distinct, which the counter word guarantees outright rather than by chance.
         Assert.Equal(64, refs.Distinct().Count());
