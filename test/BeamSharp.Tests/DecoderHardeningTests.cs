@@ -229,4 +229,39 @@ public class DecoderHardeningTests
         Assert.Throws<ErlDecodeException>(() => TermDecoder.Decode(Bits(9)));
         Assert.Equal(new ErlBitstring([0xFF], 3), TermDecoder.Decode(Bits(3)));
     }
+
+    [Fact]
+    public void An_export_with_an_out_of_range_arity_is_rejected()
+    {
+        // EXPORT_EXT: module atom, function atom, then an arity that a peer picks. Erlang integers
+        // are unbounded, so nothing stops that arity being a bignum, and the decoder used to cast it
+        // to int unchecked — an OverflowException, which is not the failure mode this class pins.
+        static byte[] Export(byte[] arity)
+        {
+            List<byte> frame = [131, TermTags.Export];
+            void Atom(string name)
+            {
+                frame.Add(TermTags.SmallAtomUtf8);
+                frame.Add((byte)name.Length);
+                frame.AddRange(System.Text.Encoding.UTF8.GetBytes(name));
+            }
+
+            Atom("erlang");
+            Atom("apply");
+            frame.AddRange(arity);
+            return [.. frame];
+        }
+
+        // SMALL_BIG_EXT: 9 digits, positive, little-endian 2^70.
+        byte[] bignum = [TermTags.SmallBig, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40];
+        Assert.Throws<ErlDecodeException>(() => TermDecoder.Decode(Export(bignum)));
+
+        // An arity past what the emulator allows a function is malformed too, bignum or not.
+        Assert.Throws<ErlDecodeException>(() =>
+            TermDecoder.Decode(Export([TermTags.Integer, 0, 0, 1, 0])));
+
+        // And the ordinary case still decodes.
+        Assert.Equal(new ErlExport(new ErlAtom("erlang"), new ErlAtom("apply"), 2),
+            TermDecoder.Decode(Export([TermTags.SmallInteger, 2])));
+    }
 }

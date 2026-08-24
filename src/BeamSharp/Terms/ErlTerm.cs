@@ -86,6 +86,14 @@ public sealed class ErlInt : ErlTerm
     public long AsLong => (long)Value;
     public int AsInt => (int)Value;
 
+    /// <summary>The value as an int, or null when it does not fit in one.</summary>
+    /// <remarks>
+    /// Erlang integers are unbounded, so a term off the wire can be a bignum in a slot the code
+    /// reading it expects to be small. <see cref="AsInt"/> throws there rather than truncating, and
+    /// a throw is the wrong answer for input a peer chose.
+    /// </remarks>
+    public int? AsIntOrNull => Value >= int.MinValue && Value <= int.MaxValue ? (int)Value : null;
+
     public override bool Equals(ErlTerm? other) => other is ErlInt i && i.Value == Value;
     public override int GetHashCode() => HashCode.Combine(nameof(ErlInt), Value);
     internal override void Format(StringBuilder sb) => sb.Append(Value.ToString(CultureInfo.InvariantCulture));

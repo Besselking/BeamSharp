@@ -517,7 +517,16 @@ public sealed class ErlangNode : IAsyncDisposable
             return;
         }
 
-        var operation = (DistOp)op.AsInt;
+        // The opcode is a term the peer chose, so it can be a bignum. Casting it before the arity
+        // guard below let an OverflowException reach the read loop and drop the connection — the
+        // exact outcome that guard was added to prevent.
+        if (op.AsIntOrNull is not { } code)
+        {
+            Log($"ignoring control message with an out-of-range operation {op.Value}");
+            return;
+        }
+
+        var operation = (DistOp)code;
 
         // The dispatcher reads fields out of the tuple by position, so the arity has to be checked
         // before it does. A peer past the cookie is still not one that has to be well behaved, and
