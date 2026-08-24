@@ -112,53 +112,68 @@ public sealed class EpmdClient : IAsyncDisposable
 
         return await RunAsync(async token =>
         {
-        var client = await HostResolver.ConnectAsync(_host, _port, token).ConfigureAwait(false);
-        var stream = client.GetStream();
-
-        var name = Encoding.UTF8.GetBytes(aliveName);
-        var body = new byte[1 + 2 + 1 + 1 + 2 + 2 + 2 + name.Length + 2];
-        var w = body.AsSpan();
-        w[0] = Alive2Req;
-        BinaryPrimitives.WriteUInt16BigEndian(w[1..], (ushort)listenPort);
-        w[3] = (byte)visibility;
-        w[4] = 0; // protocol: tcp/ipv4
-        BinaryPrimitives.WriteUInt16BigEndian(w[5..], DistVersionHigh);
-        BinaryPrimitives.WriteUInt16BigEndian(w[7..], DistVersionLow);
-        BinaryPrimitives.WriteUInt16BigEndian(w[9..], (ushort)name.Length);
-        name.CopyTo(w[11..]);
-        BinaryPrimitives.WriteUInt16BigEndian(w[(11 + name.Length)..], 0); // no extra
-
-        await WriteFramedAsync(stream, body, token).ConfigureAwait(false);
-
-        var tag = new byte[1];
-        await ReadExactAsync(stream, tag, token).ConfigureAwait(false);
-
-        uint creation;
-        switch (tag[0])
-        {
-            case Alive2XResp:
+            // Not a using, unlike LookupAsync and NamesAsync: EPMD drops a node's registration when
+            // this socket closes, so on success it has to outlive the call. On any failure it must
+            // not, and a duplicate node name -- the likeliest failure, and the one most likely to be
+            // retried in a loop -- would otherwise leak one socket per attempt.
+            var client = await HostResolver.ConnectAsync(_host, _port, token).ConfigureAwait(false);
+            try
             {
-                var resp = new byte[5];
-                await ReadExactAsync(stream, resp, token).ConfigureAwait(false);
-                if (resp[0] != 0) throw new EpmdException($"EPMD refused registration of '{aliveName}' (likely a duplicate name)");
-                creation = BinaryPrimitives.ReadUInt32BigEndian(resp.AsSpan(1));
-                break;
+                var stream = client.GetStream();
+
+                var name = Encoding.UTF8.GetBytes(aliveName);
+                var body = new byte[1 + 2 + 1 + 1 + 2 + 2 + 2 + name.Length + 2];
+                var w = body.AsSpan();
+                w[0] = Alive2Req;
+                BinaryPrimitives.WriteUInt16BigEndian(w[1..], (ushort)listenPort);
+                w[3] = (byte)visibility;
+                w[4] = 0; // protocol: tcp/ipv4
+                BinaryPrimitives.WriteUInt16BigEndian(w[5..], DistVersionHigh);
+                BinaryPrimitives.WriteUInt16BigEndian(w[7..], DistVersionLow);
+                BinaryPrimitives.WriteUInt16BigEndian(w[9..], (ushort)name.Length);
+                name.CopyTo(w[11..]);
+                BinaryPrimitives.WriteUInt16BigEndian(w[(11 + name.Length)..], 0); // no extra
+
+                await WriteFramedAsync(stream, body, token).ConfigureAwait(false);
+
+                var tag = new byte[1];
+                await ReadExactAsync(stream, tag, token).ConfigureAwait(false);
+
+                uint creation;
+                switch (tag[0])
+                {
+                    case Alive2XResp:
+                    {
+                        var resp = new byte[5];
+                        await ReadExactAsync(stream, resp, token).ConfigureAwait(false);
+                        if (resp[0] != 0)
+                            throw new EpmdException(
+                                $"EPMD refused registration of '{aliveName}' (likely a duplicate name)");
+                        creation = BinaryPrimitives.ReadUInt32BigEndian(resp.AsSpan(1));
+                        break;
+                    }
+                    case Alive2Resp:
+                    {
+                        var resp = new byte[3];
+                        await ReadExactAsync(stream, resp, token).ConfigureAwait(false);
+                        if (resp[0] != 0)
+                            throw new EpmdException(
+                                $"EPMD refused registration of '{aliveName}' (likely a duplicate name)");
+                        creation = BinaryPrimitives.ReadUInt16BigEndian(resp.AsSpan(1));
+                        break;
+                    }
+                    default:
+                        throw new EpmdException($"unexpected EPMD registration response tag {tag[0]}");
+                }
+
+                _registration = client;
+                return new EpmdRegistration(creation);
             }
-            case Alive2Resp:
+            catch
             {
-                var resp = new byte[3];
-                await ReadExactAsync(stream, resp, token).ConfigureAwait(false);
-                if (resp[0] != 0) throw new EpmdException($"EPMD refused registration of '{aliveName}' (likely a duplicate name)");
-                creation = BinaryPrimitives.ReadUInt16BigEndian(resp.AsSpan(1));
-                break;
-            }
-            default:
                 client.Dispose();
-                throw new EpmdException($"unexpected EPMD registration response tag {tag[0]}");
-        }
-
-        _registration = client;
-        return new EpmdRegistration(creation);
+                throw;
+            }
         }, ct).ConfigureAwait(false);
     }
 

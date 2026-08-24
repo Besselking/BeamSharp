@@ -27,8 +27,11 @@ public sealed class ErlangNode : IAsyncDisposable
     private readonly ConcurrentDictionary<string, Mailbox> _registered = new();
     private readonly ConcurrentDictionary<ErlPid, Mailbox> _mailboxes = new();
     private readonly ConcurrentDictionary<ErlRef, PendingCall> _pendingCalls = new();
+    private readonly ConcurrentDictionary<string, Exception> _lastConnectFailures = new();
     private readonly ConcurrentDictionary<ErlRef, Mailbox> _aliases = new();
     private readonly SemaphoreSlim _connectLock = new(1, 1);
+    private readonly string _cookieSource;
+    private readonly string? _cookieWarning;
     private int _handshakesInFlight;
 
     /// <summary>How long to wait after a failed accept before trying again.</summary>
@@ -47,9 +50,19 @@ public sealed class ErlangNode : IAsyncDisposable
     {
         Name = NodeName.Parse(nodeName);
         _options = options ?? new ErlangNodeOptions();
-        Cookie = _options.Cookie ?? ReadCookieFile()
-            ?? throw new InvalidOperationException(
-                "no cookie was supplied and ~/.erlang.cookie could not be read");
+        if (_options.Cookie is { } configured)
+        {
+            Cookie = configured;
+            _cookieSource = "the supplied options";
+        }
+        else
+        {
+            Cookie = ReadCookieFile(out var cookiePath, out var permissionWarning)
+                ?? throw new InvalidOperationException(
+                    "no cookie was supplied and ~/.erlang.cookie could not be read");
+            _cookieSource = cookiePath;
+            _cookieWarning = permissionWarning;
+        }
         _epmd = new EpmdClient(_options.EpmdHost, _options.EpmdPort);
     }
 
@@ -107,7 +120,12 @@ public sealed class ErlangNode : IAsyncDisposable
 
         var registration = await _epmd.RegisterAsync(Name.Alive, Port, _options.Visibility, ct).ConfigureAwait(false);
         Creation = registration.Creation;
-        Log($"{Name} listening on port {Port}, creation {Creation}, cookie {Cookie[..Math.Min(3, Cookie.Length)]}...");
+        // Where the cookie came from, never any part of the cookie: the hosting package routes this
+        // callback into ILogger, which ships it off the box. The source is the more useful half in
+        // any case, since reading the wrong file is the common first-run problem, not mistyping.
+        Log($"{Name} listening on port {Port}, creation {Creation}, cookie from {_cookieSource}");
+
+        if (_cookieWarning is not null) Log(_cookieWarning);
 
         if (_options.ProvideNetKernel) RegisterGenServer("net_kernel", new NetKernelServer());
 
@@ -206,7 +224,12 @@ public sealed class ErlangNode : IAsyncDisposable
             var info = await epmd.LookupAsync(peer.Alive, ct).ConfigureAwait(false);
             if (info is null)
             {
-                Log($"EPMD on {peer.Host} does not know a node called '{peer.Alive}'");
+                // The commonest failure of the lot, and the one that reaches here without an
+                // exception to carry, so it gets one made for it.
+                var unknown = new IOException(
+                    $"EPMD on {peer.Host} does not know a node called '{peer.Alive}'");
+                RecordConnectFailure(peerNode, unknown);
+                Log(unknown.Message);
                 return false;
             }
 
@@ -222,15 +245,20 @@ public sealed class ErlangNode : IAsyncDisposable
                 .ConfigureAwait(false);
             await AttachConnectionAsync(new DistConnection(client, stream, handshake, _options.TickTime))
                 .ConfigureAwait(false);
+            _lastConnectFailures.TryRemove(peerNode, out _);
             return true;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            Log($"connecting to {peerNode} timed out after {_options.HandshakeTimeout.TotalSeconds:0}s");
+            var timeout = new TimeoutException(
+                $"connecting to {peerNode} timed out after {_options.HandshakeTimeout.TotalSeconds:0}s");
+            RecordConnectFailure(peerNode, timeout);
+            Log(timeout.Message);
             return false;
         }
         catch (Exception ex)
         {
+            RecordConnectFailure(peerNode, ex);
             Log($"connecting to {peerNode} failed: {ex.Message}");
             return false;
         }
@@ -322,8 +350,21 @@ public sealed class ErlangNode : IAsyncDisposable
         if (_connections.TryGetValue(node, out var existing) && !existing.IsClosed) return existing;
         if (await ConnectAsync(node, ct).ConfigureAwait(false) &&
             _connections.TryGetValue(node, out var fresh)) return fresh;
-        throw new IOException($"no connection to {node}");
+
+        // ConnectAsync reports a bad cookie, an unknown node, a TLS mismatch, a DNS failure and a
+        // refused connection all as false, and the reason reaches only the log callback, which
+        // defaults to discarding. The two commonest first-run problems here are a cookie mismatch
+        // and the TLS/plaintext framing mismatch the README warns about, so the explanation is
+        // worth carrying to whoever gets the throw.
+        throw new IOException($"no connection to {node}", _lastConnectFailures.GetValueOrDefault(node));
     }
+
+    /// <summary>
+    /// Remembers why the last attempt at <paramref name="node"/> failed, so the throw that follows
+    /// can carry it. Only ever one exception per peer, replaced each time.
+    /// </summary>
+    private void RecordConnectFailure(string node, Exception error) =>
+        _lastConnectFailures[node] = error;
 
     // --------------------------------------------------------------- mailboxes
 
@@ -331,6 +372,13 @@ public sealed class ErlangNode : IAsyncDisposable
     /// Creates a mailbox — the C# equivalent of spawning a process. Pass a name to register it so
     /// remote code can address it as <c>{:name, :"node@host"}</c>.
     /// </summary>
+    /// <param name="registeredName">A name remote code can address, or null for an unnamed mailbox.</param>
+    /// <param name="capacity">
+    /// Zero, the default, means unbounded, matching an Erlang process mailbox — but the emulator has
+    /// <c>max_heap_size</c> behind it and this does not, so a peer sending faster than the handler
+    /// drains grows the inbox until the process dies. A positive value bounds it by dropping the
+    /// <em>oldest</em> message, not by refusing the newest.
+    /// </param>
     public Mailbox CreateMailbox(string? registeredName = null, int capacity = 0)
     {
         var mailbox = new Mailbox(this, NextPid(), registeredName, capacity);
@@ -346,6 +394,9 @@ public sealed class ErlangNode : IAsyncDisposable
     }
 
     /// <summary>Registers a handler that behaves like an Elixir <c>GenServer</c> under the given name.</summary>
+    /// <param name="name">The name remote code addresses the server by.</param>
+    /// <param name="handler">The callbacks invoked for calls, casts and plain messages.</param>
+    /// <param name="capacity">See <see cref="CreateMailbox"/>; zero means unbounded.</param>
     public Mailbox RegisterGenServer(string name, IErlangGenServer handler, int capacity = 0)
     {
         var mailbox = CreateMailbox(name, capacity);
@@ -906,11 +957,26 @@ public sealed class ErlangNode : IAsyncDisposable
             [(uint)(n & 0xFFFFFFFF), (uint)(n >> 32), (uint)Random.Shared.Next()]);
     }
 
-    private static string? ReadCookieFile()
+    private static string? ReadCookieFile(out string path, out string? permissionWarning)
     {
-        var path = Path.Combine(
+        permissionWarning = null;
+        path = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".erlang.cookie");
-        return File.Exists(path) ? File.ReadAllText(path).Trim() : null;
+        if (!File.Exists(path)) return null;
+
+        // Erlang refuses a cookie file that is not owner-only. Whether that is worth refusing over
+        // is the operator's call, so this reports rather than blocks -- and only where the POSIX
+        // mode means anything, which is not Windows.
+        if (!OperatingSystem.IsWindows())
+        {
+            var mode = File.GetUnixFileMode(path);
+            if ((mode & ~(UnixFileMode.UserRead | UnixFileMode.UserWrite)) != UnixFileMode.None)
+                permissionWarning =
+                    $"{path} is readable beyond its owner ({mode}); Erlang refuses a cookie file " +
+                    "that is not owner-only, and the cookie is the whole of the authentication";
+        }
+
+        return File.ReadAllText(path).Trim();
     }
 
     private void Log(string message) => _options.Log?.Invoke(message);
