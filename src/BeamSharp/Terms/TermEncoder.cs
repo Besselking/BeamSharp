@@ -60,8 +60,8 @@ public sealed class TermEncoder
 
     public void WriteTerm(ErlTerm term)
     {
-        // Terms built in C# rather than received off a socket reach this too, and nothing bounds how
-        // deeply a caller can nest one.
+        // Terms built in C# reach this as readily as terms received off a socket, and nothing bounds
+        // how deeply a caller can nest one.
         if (++_depth > MaxDepth)
         {
             _depth--;
@@ -204,9 +204,9 @@ public sealed class TermEncoder
     {
         var byteCount = Encoding.UTF8.GetByteCount(name);
 
-        // The length below is written as a ushort. Narrowing it unchecked did not just truncate the
-        // atom: the bytes past the declared length were then read as further terms, so one oversized
-        // atom desynchronised everything after it in the frame.
+        // The length below is written as a ushort, and narrowing it does more than truncate the
+        // atom: a decoder reads the bytes past the declared length as further terms, so one
+        // oversized atom desynchronises everything after it in the frame.
         if (byteCount > MaxAtomBytes)
             throw new ArgumentException(
                 string.Create(CultureInfo.InvariantCulture,

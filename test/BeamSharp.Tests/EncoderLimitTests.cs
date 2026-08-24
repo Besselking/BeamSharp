@@ -13,8 +13,8 @@ public class EncoderLimitTests
     [Fact]
     public void An_atom_too_long_for_its_length_field_is_refused_rather_than_truncated()
     {
-        // 70,000 & 0xFFFF is 4,464: the atom used to encode with that declared on the wire, and the
-        // 65,536 bytes past it were then read as further terms, desynchronising the whole frame.
+        // Narrowed to a ushort, 70,000 declares 4,464 on the wire, and the 65,536 bytes past that
+        // are read as further terms: the whole frame after the atom desynchronises.
         var oversized = new string('a', 70_000);
         var ex = Assert.Throws<ArgumentException>(() => TermEncoder.Encode(new ErlAtom(oversized)));
         // Formatted invariantly: these messages get logged and compared, and a thousands

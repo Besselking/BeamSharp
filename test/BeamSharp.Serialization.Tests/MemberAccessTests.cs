@@ -4,9 +4,9 @@ using Xunit;
 namespace BeamSharp.Serialization.Tests;
 
 /// <summary>
-/// The reflection fallback used to read every member twice: once for the null test, then again
-/// inside the write. The generator has always bound the value once, so the fallback was diverging
-/// from the implementation it is checked against.
+/// The fallback is checked for equivalence against the generator, which binds each member's value
+/// once. Reading a member twice diverges from that for any getter that is not pure, and costs a
+/// reflective call for no gain on every other.
 /// </summary>
 public class MemberAccessTests
 {
@@ -25,8 +25,8 @@ public class MemberAccessTests
     [Fact]
     public void The_value_written_is_the_value_that_passed_the_null_test()
     {
-        // A getter that changes between calls is unusual but legal, and reading twice meant the
-        // value checked for null was not the value that got written -- the second read's.
+        // A getter that changes between calls is unusual but legal: the value tested for null has
+        // to be the one written, not whatever a second read returns.
         var flipping = new FlipsAfterFirstRead();
         var term = Assert.IsType<ErlMap>(ErlSerializer.Serialize(flipping, Reflected.Options));
 

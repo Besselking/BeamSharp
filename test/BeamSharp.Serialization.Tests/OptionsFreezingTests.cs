@@ -19,8 +19,8 @@ public class OptionsFreezingTests
         Assert.True(options.IsReadOnly);
         Assert.Throws<InvalidOperationException>(() => options.IgnoreNullValues = true);
 
-        // These used to be plain lists behind a read-only property: the reference could not be
-        // replaced, but everything it held could.
+        // A read-only property is not enough on its own: it stops the reference being replaced, not
+        // the list being changed.
         Assert.Throws<InvalidOperationException>(() => options.Converters.Add(new ShoutingConverter()));
         Assert.Throws<InvalidOperationException>(() => options.Converters.Clear());
         Assert.Throws<InvalidOperationException>(() => options.ConverterFactories.Clear());

@@ -121,11 +121,10 @@ public sealed class ErlSerializerOptions
     /// <summary>Freezes the options. Called automatically the first time they are used.</summary>
     public void MakeReadOnly()
     {
-        // The scalar setters were refused once this was set, but the two collections were plain
-        // lists, so anything in the process could still add a converter to the shared Default -- and
-        // since Converters is consulted ahead of the built-in scalars, that reached even int. Worse
-        // than a hijack, it was a torn one: _cache already holds whatever was resolved before the
-        // add, so one type ends up with two mappings depending on when it was first seen.
+        // The collections have to freeze alongside the scalars. Converters is consulted ahead of the
+        // built-in scalars, so one added here reaches even int, and _cache already holds whatever
+        // was resolved before it -- leaving one type with two mappings depending on when it was
+        // first seen, which is worse than either mapping would be on its own.
         _readOnly = true;
         (Converters as FreezableList<ErlConverter>)?.Freeze();
         (ConverterFactories as FreezableList<ErlConverterFactory>)?.Freeze();

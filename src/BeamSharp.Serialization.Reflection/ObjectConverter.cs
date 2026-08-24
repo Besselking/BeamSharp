@@ -75,9 +75,9 @@ internal sealed class ObjectConverter<T> : ErlConverter<T>
 
         foreach (var member in _members)
         {
-            // One call, not two. member.Get is instance => property.GetValue(instance), the most
-            // expensive thing on this path, and reading twice also meant the value that passed the
-            // null test was not necessarily the value written for any getter that is not pure.
+            // One call, not two: member.Get is instance => property.GetValue(instance), the most
+            // expensive thing on this path, and a getter that is not pure has to be asked once if
+            // the value tested for null is to be the value written.
             var raw = member.Get(value);
             if (raw is null && options.IgnoreNullValues) continue;
             entries.Add(new KeyValuePair<ErlTerm, ErlTerm>(
