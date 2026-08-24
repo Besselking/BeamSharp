@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Numerics;
 using System.Text;
 
@@ -11,8 +12,23 @@ namespace BeamSharp.Terms;
 /// </summary>
 public sealed class TermEncoder
 {
+    /// <summary>
+    /// The longest atom this will encode, in bytes. The emulator caps an atom at 255 characters,
+    /// which is 1,020 bytes once they are UTF-8 -- and why ATOM_UTF8_EXT carries a two-byte length
+    /// at all, since 255 bytes would not have been enough for it.
+    /// </summary>
+    public const int MaxAtomBytes = 1020;
+
+    /// <summary>
+    /// How deeply a term may nest before encoding gives up. The same bound the decoder uses, and
+    /// for the same reason: this walks nesting with the call stack, and overflowing it aborts the
+    /// process rather than throwing something catchable.
+    /// </summary>
+    public const int MaxDepth = TermDecoder.DefaultMaxDepth;
+
     private byte[] _buffer;
     private int _length;
+    private int _depth;
 
     public TermEncoder(int initialCapacity = 256) => _buffer = new byte[initialCapacity];
 
@@ -43,6 +59,27 @@ public sealed class TermEncoder
     }
 
     public void WriteTerm(ErlTerm term)
+    {
+        // Terms built in C# reach this as readily as terms received off a socket, and nothing bounds
+        // how deeply a caller can nest one.
+        if (++_depth > MaxDepth)
+        {
+            _depth--;
+            throw new ArgumentException(
+                $"a term nested deeper than {MaxDepth} cannot be encoded", nameof(term));
+        }
+
+        try
+        {
+            WriteTermCore(term);
+        }
+        finally
+        {
+            _depth--;
+        }
+    }
+
+    private void WriteTermCore(ErlTerm term)
     {
         switch (term)
         {
@@ -166,6 +203,16 @@ public sealed class TermEncoder
     private void WriteAtom(string name)
     {
         var byteCount = Encoding.UTF8.GetByteCount(name);
+
+        // The length below is written as a ushort, and narrowing it does more than truncate the
+        // atom: a decoder reads the bytes past the declared length as further terms, so one
+        // oversized atom desynchronises everything after it in the frame.
+        if (byteCount > MaxAtomBytes)
+            throw new ArgumentException(
+                string.Create(CultureInfo.InvariantCulture,
+                    $"an atom of {byteCount} bytes exceeds the {MaxAtomBytes} byte limit"),
+                nameof(name));
+
         if (byteCount < 256)
         {
             WriteByte(TermTags.SmallAtomUtf8);
