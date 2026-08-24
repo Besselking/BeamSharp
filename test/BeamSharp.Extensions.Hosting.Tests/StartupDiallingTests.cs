@@ -11,7 +11,11 @@ public class StartupDiallingTests
     /// An IHostedService that has not returned holds up everything started after it, so dialling
     /// peers there puts the EPMD and handshake timeouts in front of the application.
     /// </summary>
-    [Fact]
+    /// <remarks>
+    /// Starting the service registers the node, so this needs a port mapper -- unlike the other
+    /// tests here, which only inspect the service collection.
+    /// </remarks>
+    [RequiresEpmdFact]
     public async Task Unreachable_startup_peers_do_not_hold_up_the_application()
     {
         var services = new ServiceCollection();
