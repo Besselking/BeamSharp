@@ -121,6 +121,15 @@ public static class Handshake
         if (challengeMsg.Length < 19 || challengeMsg[0] != (byte)'N')
             throw new HandshakeException("malformed challenge message");
         var peerFlags = (DistributionFlags)BinaryPrimitives.ReadUInt64BigEndian(challengeMsg.AsSpan(1));
+
+        // AcceptAsync checks this on the way in and the dialling side did not, so a peer missing a
+        // mandatory flag failed later and less clearly -- somewhere in the first frames exchanged,
+        // rather than here where the flags are in hand and can be named.
+        var missingFlags = DistributionFlags.Mandatory & ~ExpandMandatoryDigest(peerFlags);
+        if (missingFlags != DistributionFlags.None)
+            throw new HandshakeException(
+                $"peer {expectedPeerNode} is missing mandatory distribution flags: {missingFlags}");
+
         var peerChallenge = BinaryPrimitives.ReadUInt32BigEndian(challengeMsg.AsSpan(9));
         var peerCreation = BinaryPrimitives.ReadUInt32BigEndian(challengeMsg.AsSpan(13));
         var nameLen = BinaryPrimitives.ReadUInt16BigEndian(challengeMsg.AsSpan(17));

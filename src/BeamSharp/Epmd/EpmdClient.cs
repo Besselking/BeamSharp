@@ -112,7 +112,14 @@ public sealed class EpmdClient : IAsyncDisposable
 
         return await RunAsync(async token =>
         {
+        // Not a using, though LookupAsync and NamesAsync both are: EPMD drops a node's registration
+        // when this socket closes, so on success it has to outlive the call. On any failure it must
+        // not -- and two of the three ways out of the switch below used to throw with it still open.
+        // The commonest of those, a duplicate node name, is also the one most likely to be retried
+        // in a loop, so the leak compounded.
         var client = await HostResolver.ConnectAsync(_host, _port, token).ConfigureAwait(false);
+        try
+        {
         var stream = client.GetStream();
 
         var name = Encoding.UTF8.GetBytes(aliveName);
@@ -153,12 +160,17 @@ public sealed class EpmdClient : IAsyncDisposable
                 break;
             }
             default:
-                client.Dispose();
                 throw new EpmdException($"unexpected EPMD registration response tag {tag[0]}");
         }
 
         _registration = client;
         return new EpmdRegistration(creation);
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
         }, ct).ConfigureAwait(false);
     }
 

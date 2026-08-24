@@ -24,6 +24,12 @@ public sealed class Mailbox : IAsyncDisposable
 
     private int _closed;
 
+    /// <remarks>
+    /// A capacity of zero means unbounded, which is what an Erlang process mailbox is too -- but the
+    /// emulator has max_heap_size behind it and this does not, so a peer sending faster than the
+    /// handler drains grows the inbox until the process dies. A positive capacity drops the OLDEST
+    /// message rather than refusing the newest, which matters if you were expecting the opposite.
+    /// </remarks>
     internal Mailbox(ErlangNode node, ErlPid pid, string? registeredName, int capacity)
     {
         _node = node;
