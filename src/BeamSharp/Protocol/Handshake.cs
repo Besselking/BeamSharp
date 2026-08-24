@@ -163,9 +163,26 @@ public static class Handshake
 
     // --- message builders ---------------------------------------------------
 
-    private static byte[] BuildNewName(DistributionFlags flags, uint creation, string node)
+    /// <summary>
+    /// The longest node name that fits the two-byte length these messages carry. EPMD's own limit is
+    /// lower still; either way a name that wraps the field registers something nobody can reach.
+    /// </summary>
+    private const int MaxNodeNameBytes = ushort.MaxValue;
+
+    private static byte[] EncodeNodeName(string node)
     {
         var name = Encoding.UTF8.GetBytes(node);
+        if (name.Length > MaxNodeNameBytes)
+            throw new ArgumentException(
+                $"a node name of {name.Length:N0} bytes exceeds the {MaxNodeNameBytes:N0} byte limit",
+                nameof(node));
+
+        return name;
+    }
+
+    private static byte[] BuildNewName(DistributionFlags flags, uint creation, string node)
+    {
+        var name = EncodeNodeName(node);
         var msg = new byte[1 + 8 + 4 + 2 + name.Length];
         msg[0] = (byte)'N';
         BinaryPrimitives.WriteUInt64BigEndian(msg.AsSpan(1), (ulong)flags);
@@ -177,7 +194,7 @@ public static class Handshake
 
     private static byte[] BuildNewChallenge(DistributionFlags flags, uint challenge, uint creation, string node)
     {
-        var name = Encoding.UTF8.GetBytes(node);
+        var name = EncodeNodeName(node);
         var msg = new byte[1 + 8 + 4 + 4 + 2 + name.Length];
         msg[0] = (byte)'N';
         BinaryPrimitives.WriteUInt64BigEndian(msg.AsSpan(1), (ulong)flags);

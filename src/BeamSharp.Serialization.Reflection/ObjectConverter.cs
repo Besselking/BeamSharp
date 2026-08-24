@@ -65,7 +65,7 @@ internal sealed class ObjectConverter<T> : ErlConverter<T>
             var items = new ErlTerm[_members.Length + 1];
             items[0] = _recordTag;
             for (var i = 0; i < _members.Length; i++)
-                items[i + 1] = WriteMember(_members[i], value, options);
+                items[i + 1] = WriteValue(_members[i], _members[i].Get(value), options);
             return new ErlTuple(items);
         }
 
@@ -75,19 +75,21 @@ internal sealed class ObjectConverter<T> : ErlConverter<T>
 
         foreach (var member in _members)
         {
+            // One call, not two. member.Get is instance => property.GetValue(instance), the most
+            // expensive thing on this path, and reading twice also meant the value that passed the
+            // null test was not necessarily the value written for any getter that is not pure.
             var raw = member.Get(value);
             if (raw is null && options.IgnoreNullValues) continue;
             entries.Add(new KeyValuePair<ErlTerm, ErlTerm>(
                 _atomKeys ? new ErlAtom(member.ErlName) : new ErlBinary(member.ErlName),
-                WriteMember(member, value, options)));
+                WriteValue(member, raw, options)));
         }
 
         return new ErlMap(entries);
     }
 
-    private static ErlTerm WriteMember(Member member, T value, ErlSerializerOptions options)
+    private static ErlTerm WriteValue(Member member, object? raw, ErlSerializerOptions options)
     {
-        var raw = member.Get(value!);
         if (raw is null) return options.NullAtom;
         return member.Converter is { } converter
             ? converter.WriteUntyped(raw, options)

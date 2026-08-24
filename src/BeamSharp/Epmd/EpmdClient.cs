@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Net.Sockets;
 using BeamSharp.Networking;
 using System.Text;
@@ -48,6 +49,11 @@ public sealed class EpmdClient : IAsyncDisposable
     /// unbounded read from a network source unless it is capped; a real EPMD sends a few kilobytes.
     /// </summary>
     private const int MaxNamesResponse = 1024 * 1024;
+
+    /// <summary>
+    /// EPMD's own limit on the alive name it will register (MAXSYMLEN in the C sources).
+    /// </summary>
+    private const int MaxAliveNameBytes = 63;
 
     private readonly string _host;
     private readonly int _port;
@@ -112,6 +118,15 @@ public sealed class EpmdClient : IAsyncDisposable
 
         return await RunAsync(async token =>
         {
+            var name = Encoding.UTF8.GetBytes(aliveName);
+
+            // The length is written as a ushort below, so a longer name wraps the field and
+            // registers a node under a name nobody can look up. Checked before the connect: a name
+            // this long is the caller's mistake and needs no socket to reject.
+            if (name.Length > MaxAliveNameBytes)
+                throw new EpmdException(string.Create(CultureInfo.InvariantCulture,
+                    $"a node name of {name.Length} bytes exceeds the {MaxAliveNameBytes} byte limit"));
+
             // Not a using, unlike LookupAsync and NamesAsync: EPMD drops a node's registration when
             // this socket closes, so on success it has to outlive the call. On any failure it must
             // not, and a duplicate node name -- the likeliest failure, and the one most likely to be
@@ -121,7 +136,6 @@ public sealed class EpmdClient : IAsyncDisposable
             {
                 var stream = client.GetStream();
 
-                var name = Encoding.UTF8.GetBytes(aliveName);
                 var body = new byte[1 + 2 + 1 + 1 + 2 + 2 + 2 + name.Length + 2];
                 var w = body.AsSpan();
                 w[0] = Alive2Req;

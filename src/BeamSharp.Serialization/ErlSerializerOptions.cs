@@ -58,15 +58,16 @@ public sealed class ErlSerializerOptions
         _nullValue = source._nullValue;
         _ignoreNullValues = source._ignoreNullValues;
         _includeFields = source._includeFields;
-        Converters = [.. source.Converters];
-        ConverterFactories = [.. source.ConverterFactories];
+        Converters = new FreezableList<ErlConverter>(source.Converters);
+        ConverterFactories = new FreezableList<ErlConverterFactory>(source.ConverterFactories);
     }
 
     /// <summary>Converters for specific types, consulted before anything built in.</summary>
-    public IList<ErlConverter> Converters { get; private init; } = [];
+    public IList<ErlConverter> Converters { get; private init; } = new FreezableList<ErlConverter>();
 
     /// <summary>Factories for families of types, consulted after <see cref="Converters"/>.</summary>
-    public IList<ErlConverterFactory> ConverterFactories { get; private init; } = [];
+    public IList<ErlConverterFactory> ConverterFactories { get; private init; } =
+        new FreezableList<ErlConverterFactory>();
 
     /// <summary>How CLR member names become Erlang names. Defaults to snake_case.</summary>
     public ErlNamingPolicy PropertyNamingPolicy
@@ -118,7 +119,17 @@ public sealed class ErlSerializerOptions
     public bool IsReadOnly => _readOnly;
 
     /// <summary>Freezes the options. Called automatically the first time they are used.</summary>
-    public void MakeReadOnly() => _readOnly = true;
+    public void MakeReadOnly()
+    {
+        // The scalar setters were refused once this was set, but the two collections were plain
+        // lists, so anything in the process could still add a converter to the shared Default -- and
+        // since Converters is consulted ahead of the built-in scalars, that reached even int. Worse
+        // than a hijack, it was a torn one: _cache already holds whatever was resolved before the
+        // add, so one type ends up with two mappings depending on when it was first seen.
+        _readOnly = true;
+        (Converters as FreezableList<ErlConverter>)?.Freeze();
+        (ConverterFactories as FreezableList<ErlConverterFactory>)?.Freeze();
+    }
 
     private void Set<T>(ref T field, T value)
     {
