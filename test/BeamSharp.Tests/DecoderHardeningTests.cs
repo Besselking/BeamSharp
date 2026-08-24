@@ -264,4 +264,43 @@ public class DecoderHardeningTests
         Assert.Equal(new ErlExport(new ErlAtom("erlang"), new ErlAtom("apply"), 2),
             TermDecoder.Decode(Export([TermTags.SmallInteger, 2])));
     }
+
+    [Fact]
+    public void A_map_that_repeats_a_key_is_rejected()
+    {
+        // MAP_EXT with arity 2, both entries keyed 'a'. Erlang's own decoder is the reference here:
+        //   binary_to_term(<<131,116,0,0,0,2, 119,1,$a, 97,1, 119,1,$a, 97,2>>)  ->  error:badarg
+        // so a frame like this is malformed rather than a frame to guess the meaning of.
+        byte[] duplicate =
+        [
+            131, TermTags.Map, 0, 0, 0, 2,
+            TermTags.SmallAtomUtf8, 1, (byte)'a', TermTags.SmallInteger, 1,
+            TermTags.SmallAtomUtf8, 1, (byte)'a', TermTags.SmallInteger, 2
+        ];
+        Assert.Throws<ErlDecodeException>(() => TermDecoder.Decode(duplicate));
+
+        // Distinct keys still decode, so this is not rejecting every map with a repeated value.
+        byte[] distinct =
+        [
+            131, TermTags.Map, 0, 0, 0, 2,
+            TermTags.SmallAtomUtf8, 1, (byte)'a', TermTags.SmallInteger, 1,
+            TermTags.SmallAtomUtf8, 1, (byte)'b', TermTags.SmallInteger, 1
+        ];
+        Assert.Equal(2, Assert.IsType<ErlMap>(TermDecoder.Decode(distinct)).Count);
+    }
+
+    [Fact]
+    public void A_map_built_in_csharp_still_takes_the_last_value_for_a_key()
+    {
+        // The other half of Erlang's behaviour: #{a => 1, a => 2} is #{a => 2}. Only what arrives
+        // off a socket is held to binary_to_term's stricter rule.
+        var map = new ErlMap(
+        [
+            new KeyValuePair<ErlTerm, ErlTerm>(new ErlAtom("a"), new ErlInt(1)),
+            new KeyValuePair<ErlTerm, ErlTerm>(new ErlAtom("a"), new ErlInt(2))
+        ]);
+
+        Assert.Equal(1, map.Count);
+        Assert.Equal(new ErlInt(2), map.Get("a"));
+    }
 }
