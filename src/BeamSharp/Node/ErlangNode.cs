@@ -120,9 +120,9 @@ public sealed class ErlangNode : IAsyncDisposable
 
         var registration = await _epmd.RegisterAsync(Name.Alive, Port, _options.Visibility, ct).ConfigureAwait(false);
         Creation = registration.Creation;
-        // The first three characters of the cookie used to go here, which the hosting package then
-        // routes into ILogger and off the box. Where it came from is the useful half of that anyway:
-        // a cookie read from the wrong file is the common first-run problem, not a mistyped one.
+        // Where the cookie came from, never any part of the cookie: the hosting package routes this
+        // callback into ILogger, which ships it off the box. The source is the more useful half in
+        // any case, since reading the wrong file is the common first-run problem, not mistyping.
         Log($"{Name} listening on port {Port}, creation {Creation}, cookie from {_cookieSource}");
 
         if (_cookieWarning is not null) Log(_cookieWarning);
@@ -351,11 +351,11 @@ public sealed class ErlangNode : IAsyncDisposable
         if (await ConnectAsync(node, ct).ConfigureAwait(false) &&
             _connections.TryGetValue(node, out var fresh)) return fresh;
 
-        // A bad cookie, an unknown node, a TLS mismatch, a DNS failure and a refused connection all
-        // came out of ConnectAsync as false, and the reason reached only the log callback, which
-        // defaults to discarding. The two commonest first-run problems with this library are a
-        // cookie mismatch and the TLS/plaintext framing mismatch the README warns about, so this is
-        // the wrong moment to lose the explanation.
+        // ConnectAsync reports a bad cookie, an unknown node, a TLS mismatch, a DNS failure and a
+        // refused connection all as false, and the reason reaches only the log callback, which
+        // defaults to discarding. The two commonest first-run problems here are a cookie mismatch
+        // and the TLS/plaintext framing mismatch the README warns about, so the explanation is
+        // worth carrying to whoever gets the throw.
         throw new IOException($"no connection to {node}", _lastConnectFailures.GetValueOrDefault(node));
     }
 
@@ -964,9 +964,9 @@ public sealed class ErlangNode : IAsyncDisposable
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".erlang.cookie");
         if (!File.Exists(path)) return null;
 
-        // Erlang refuses a cookie file that is not owner-only. Refusing outright would break nodes
-        // that work today for a reason that is the operator's to weigh, so this says so instead --
-        // and only where the mode means something, which is not Windows.
+        // Erlang refuses a cookie file that is not owner-only. Whether that is worth refusing over
+        // is the operator's call, so this reports rather than blocks -- and only where the POSIX
+        // mode means anything, which is not Windows.
         if (!OperatingSystem.IsWindows())
         {
             var mode = File.GetUnixFileMode(path);

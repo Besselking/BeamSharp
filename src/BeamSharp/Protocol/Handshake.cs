@@ -122,9 +122,9 @@ public static class Handshake
             throw new HandshakeException("malformed challenge message");
         var peerFlags = (DistributionFlags)BinaryPrimitives.ReadUInt64BigEndian(challengeMsg.AsSpan(1));
 
-        // AcceptAsync checks this on the way in and the dialling side did not, so a peer missing a
-        // mandatory flag failed later and less clearly -- somewhere in the first frames exchanged,
-        // rather than here where the flags are in hand and can be named.
+        // The same check AcceptAsync makes on the way in. Without it a peer missing a mandatory flag
+        // fails somewhere in the first frames exchanged instead of here, where the flags are in hand
+        // and can be named.
         var missingFlags = DistributionFlags.Mandatory & ~ExpandMandatoryDigest(peerFlags);
         if (missingFlags != DistributionFlags.None)
             throw new HandshakeException(
@@ -133,9 +133,9 @@ public static class Handshake
         var peerChallenge = BinaryPrimitives.ReadUInt32BigEndian(challengeMsg.AsSpan(9));
         var peerCreation = BinaryPrimitives.ReadUInt32BigEndian(challengeMsg.AsSpan(13));
         var nameLen = BinaryPrimitives.ReadUInt16BigEndian(challengeMsg.AsSpan(17));
-        // The name message parser checks this; the challenge parser did not, so a peer could claim
-        // a longer name than it sent. EPMD is unauthenticated, so what answers on the port it named
-        // is not necessarily what we meant to reach.
+        // The same length check the name message parser makes: without it a peer can claim a longer
+        // name than it sent. EPMD is unauthenticated, so what answers on the port it named is not
+        // necessarily what we meant to reach.
         if (challengeMsg.Length < 19 + nameLen)
             throw new HandshakeException("the challenge message claims a longer node name than it carries");
         var peerNode = Encoding.UTF8.GetString(challengeMsg, 19, nameLen);
