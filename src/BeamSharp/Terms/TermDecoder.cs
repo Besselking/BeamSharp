@@ -167,12 +167,18 @@ public ref struct TermDecoder
             {
                 // Two terms per entry, so two bytes is the floor for one.
                 var arity = ReadCount(bytesPerElement: 2);
-                var entries = new KeyValuePair<ErlTerm, ErlTerm>[arity];
+                var entries = new Dictionary<ErlTerm, ErlTerm>(arity);
                 for (var i = 0; i < arity; i++)
                 {
                     var k = ReadTerm();
                     var v = ReadTerm();
-                    entries[i] = new KeyValuePair<ErlTerm, ErlTerm>(k, v);
+
+                    // binary_to_term raises badarg on a map with a repeated key rather than picking
+                    // one of the values, so a frame carrying one is malformed and not a frame this
+                    // has to guess the meaning of. (A map literal in source is the other way round:
+                    // #{a => 1, a => 2} is #{a => 2}, which is what the ErlMap constructor does.)
+                    if (!entries.TryAdd(k, v))
+                        throw new ErlDecodeException($"a map carries the key {k} more than once");
                 }
                 return new ErlMap(entries);
             }
