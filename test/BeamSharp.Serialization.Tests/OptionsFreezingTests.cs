@@ -24,6 +24,11 @@ public class OptionsFreezingTests
         Assert.Throws<InvalidOperationException>(() => options.Converters.Add(new ShoutingConverter()));
         Assert.Throws<InvalidOperationException>(() => options.Converters.Clear());
         Assert.Throws<InvalidOperationException>(() => options.ConverterFactories.Clear());
+
+        // Reported through the interface, not just by the concrete type: a collection that throws on
+        // every mutation must not answer this false, which is what Collection<T> does on its own.
+        Assert.True(options.Converters.IsReadOnly);
+        Assert.True(((ICollection<ErlConverter>)options.Converters).IsReadOnly);
     }
 
     [Fact]
@@ -52,6 +57,22 @@ public class OptionsFreezingTests
 
         copy.MakeReadOnly();
         Assert.Throws<InvalidOperationException>(() => copy.Converters.Add(new ShoutingConverter()));
+    }
+
+    [Fact]
+    public void A_collection_taken_before_the_freeze_refuses_after_it()
+    {
+        var options = new ErlSerializerOptions();
+
+        // Options freeze on first use rather than when the caller says so, so holding the collection
+        // and then serializing something is enough to be on this side of it.
+        var held = options.Converters;
+        ErlSerializer.Serialize(7, options);
+
+        // Swapping in a ReadOnlyCollection at freeze time would not cover this: the reference taken
+        // earlier still points at the mutable original, and the wrapper reads through to it.
+        Assert.Throws<InvalidOperationException>(() => held.Add(new ShoutingConverter()));
+        Assert.Empty(options.Converters);
     }
 
     private sealed class ShoutingConverter : ErlConverter<int>

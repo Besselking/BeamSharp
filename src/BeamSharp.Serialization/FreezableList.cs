@@ -1,4 +1,4 @@
-using System.Collections;
+using System.Collections.ObjectModel;
 
 namespace BeamSharp.Serialization;
 
@@ -6,72 +6,65 @@ namespace BeamSharp.Serialization;
 /// A list that refuses to change once the options holding it are frozen.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <see cref="ErlSerializerOptions"/> refuses its scalar setters after <c>MakeReadOnly</c> because a
-/// converter resolved under one configuration and cached must not then be asked to honour another.
-/// A plain <see cref="List{T}"/> in a read-only property gives that guarantee away: the reference
-/// cannot be replaced, but everything it holds can. This is what
-/// <c>JsonSerializerOptions.Converters</c> does for the same reason.
+/// converter resolved under one configuration and then cached must not be asked to honour another.
+/// A plain <see cref="List{T}"/> behind a read-only property gives that away: the reference cannot
+/// be replaced, but everything it holds can.
+/// </para>
+/// <para>
+/// Wrapping the list in a <see cref="ReadOnlyCollection{T}"/> at that point would not do, because
+/// the freeze happens on first use rather than when the caller says so. Anyone holding the
+/// collection from before keeps the mutable original, and the wrapper is a view over it, so the
+/// additions show through anyway.
+/// </para>
+/// <para>
+/// Deriving from <see cref="Collection{T}"/> means every mutation arrives at one of the four methods
+/// below, including any the interface grows later.
+/// </para>
 /// </remarks>
-internal sealed class FreezableList<T> : IList<T>
+internal sealed class FreezableList<T> : Collection<T>, IList<T>
 {
-    private readonly List<T> _items;
     private bool _frozen;
 
-    public FreezableList() => _items = [];
+    public FreezableList() { }
 
-    public FreezableList(IEnumerable<T> items) => _items = [.. items];
+    public FreezableList(IEnumerable<T> items)
+    {
+        foreach (var item in items) Add(item);
+    }
 
     public void Freeze() => _frozen = true;
 
-    public int Count => _items.Count;
+    /// <summary>
+    /// Re-implemented because <see cref="Collection{T}"/> answers this false unconditionally, and a
+    /// collection that throws on every mutation should not report otherwise.
+    /// </summary>
     public bool IsReadOnly => _frozen;
 
-    public T this[int index]
-    {
-        get => _items[index];
-        set
-        {
-            ThrowIfFrozen();
-            _items[index] = value;
-        }
-    }
-
-    public void Add(T item)
+    protected override void InsertItem(int index, T item)
     {
         ThrowIfFrozen();
-        _items.Add(item);
+        base.InsertItem(index, item);
     }
 
-    public void Insert(int index, T item)
+    protected override void SetItem(int index, T item)
     {
         ThrowIfFrozen();
-        _items.Insert(index, item);
+        base.SetItem(index, item);
     }
 
-    public bool Remove(T item)
+    protected override void RemoveItem(int index)
     {
         ThrowIfFrozen();
-        return _items.Remove(item);
+        base.RemoveItem(index);
     }
 
-    public void RemoveAt(int index)
+    protected override void ClearItems()
     {
         ThrowIfFrozen();
-        _items.RemoveAt(index);
+        base.ClearItems();
     }
-
-    public void Clear()
-    {
-        ThrowIfFrozen();
-        _items.Clear();
-    }
-
-    public bool Contains(T item) => _items.Contains(item);
-    public void CopyTo(T[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
-    public int IndexOf(T item) => _items.IndexOf(item);
-    public List<T>.Enumerator GetEnumerator() => _items.GetEnumerator();
-    IEnumerator<T> IEnumerable<T>.GetEnumerator() => _items.GetEnumerator();
-    IEnumerator IEnumerable.GetEnumerator() => _items.GetEnumerator();
 
     private void ThrowIfFrozen()
     {
