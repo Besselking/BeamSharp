@@ -36,6 +36,17 @@ public sealed class ErlangNodeOptions
     /// </remarks>
     public TimeSpan HandshakeTimeout { get; set; } = TimeSpan.FromSeconds(7);
 
+    /// <summary>
+    /// How many inbound handshakes may be in flight at once. Sockets arriving past the limit are
+    /// closed rather than queued.
+    /// </summary>
+    /// <remarks>
+    /// Every attempt costs a task and, with TLS configured, an asymmetric-crypto operation, all of
+    /// it before the peer has proved it holds the cookie. <see cref="HandshakeTimeout"/> bounds how
+    /// long any one attempt lasts; this bounds how many there can be.
+    /// </remarks>
+    public int MaxConcurrentHandshakes { get; set; } = 64;
+
     /// <summary>Must match the peer's <c>net_ticktime</c> (60 seconds by default in OTP).</summary>
     public TimeSpan TickTime { get; set; } = TimeSpan.FromSeconds(60);
 
