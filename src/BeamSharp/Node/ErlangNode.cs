@@ -760,9 +760,8 @@ public sealed class ErlangNode : IAsyncDisposable
     {
         if (payload is null) return;
 
-        // A reply to one of our own gen_server calls: {[alias|Ref], Reply}. PendingCall has recorded
-        // which node the call went to since it was written -- FailPendingCallsFor uses it -- and
-        // matching on the reference alone let any connected peer answer a call made to another one.
+        // A reply to one of our own gen_server calls: {[alias|Ref], Reply}. A reference identifies
+        // the call but not who may answer it, so the node the call went to has to agree as well.
         if (_pendingCalls.TryGetValue(alias, out var pending) &&
             pending.Node == connection.PeerNode &&
             payload is ErlTuple { Arity: 2 } replyTuple)
@@ -777,8 +776,8 @@ public sealed class ErlangNode : IAsyncDisposable
 
     private void HandleDown(DistConnection connection, ErlRef reference, ErlTerm monitored, ErlTerm reason)
     {
-        // Same as the alias reply above: without the peer check a forged DOWN from any connected
-        // node fails another node's in-flight call.
+        // Same as the alias reply above: a DOWN only concerns a call that went to the peer sending
+        // it, or any connected node could fail another's call in flight.
         if (_pendingCalls.TryGetValue(reference, out var pending) &&
             pending.Node == connection.PeerNode)
         {
@@ -969,12 +968,10 @@ public sealed class ErlangNode : IAsyncDisposable
 
     /// <summary>Allocates a fresh reference on this node.</summary>
     /// <remarks>
-    /// A reference is what tells one peer's reply from another's, so it is guessable at your peril:
-    /// two of the three words used to be a counter and the third came from Random.Shared, which
-    /// meant a peer that had seen one reference knew where the next ones would be. Two words now
-    /// come from the same CSPRNG the handshake challenge uses, and the counter keeps the third so
-    /// uniqueness does not rest on chance alone. The low word is masked to 18 bits because that is
-    /// what the emulator does when it makes one.
+    /// A reference is part of what tells one peer's reply from another's, so a peer that has seen
+    /// one must not be able to work out the next. Two words come from the same CSPRNG the handshake
+    /// challenge uses; the counter keeps the third so uniqueness does not rest on chance alone. The
+    /// low word is masked to 18 bits, which is what the emulator does when it makes one.
     /// </remarks>
     public ErlRef NextRef()
     {

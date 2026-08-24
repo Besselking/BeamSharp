@@ -50,7 +50,7 @@ public sealed class PeerScopedSignalTests : IDisposable
             new ErlTuple(new ErlInt((int)DistOp.AliasSend), attacker.NextPid(), alias),
             new ErlTuple(alias, Erl.Atom("zero")));
 
-        // And a forged DOWN for the same call, which used to fail it outright.
+        // And a forged DOWN for the same call, which is the other way to disturb it.
         await toVictim.SendAsync(new ErlTuple(
             new ErlInt((int)DistOp.MonitorPExit), attacker.NextPid(), victim.NextPid(), alias,
             Erl.Atom("killed")));
@@ -68,8 +68,8 @@ public sealed class PeerScopedSignalTests : IDisposable
         await using var node = new ErlangNode($"bs_refs@{NodeName.LocalShortHost}", Cookie);
         var refs = Enumerable.Range(0, 64).Select(_ => node.NextRef()).ToList();
 
-        // Two of the three words used to be a counter and the third came from a non-cryptographic
-        // PRNG, so the first stepped by one and the second never moved at all.
+        // A counter in two of the three words shows up as one stepping by one and the other never
+        // moving, which is what these two assertions are watching for.
         Assert.Equal(64, refs.Select(r => r.Ids[0]).Distinct().Count());
         Assert.Equal(64, refs.Select(r => r.Ids[1]).Distinct().Count());
 
