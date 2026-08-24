@@ -18,6 +18,12 @@ public ref struct TermDecoder
     /// </summary>
     public const int DefaultMaxDepth = 256;
 
+    /// <summary>
+    /// The largest arity an export may claim. The emulator caps a function at 255 arguments, so a
+    /// larger value is malformed rather than merely unusual.
+    /// </summary>
+    private const int MaxExportArity = 255;
+
     private ReadOnlySpan<byte> _data;
     private readonly int _maxDepth;
     private int _pos;
@@ -238,7 +244,12 @@ public ref struct TermDecoder
                 if (ReadTerm() is not ErlAtom mod || ReadTerm() is not ErlAtom fun ||
                     ReadTerm() is not ErlInt arity)
                     throw new ErlDecodeException("an export needs a module atom, a function atom and an arity");
-                return new ErlExport(mod, fun, arity.AsInt);
+                // Erlang integers are unbounded, so nothing stops a peer putting a bignum in the
+                // arity slot. Casting it here threw OverflowException, which escapes the single
+                // failure mode the rest of this decoder is careful to present.
+                if (arity.AsIntOrNull is not { } fixedArity || fixedArity is < 0 or > MaxExportArity)
+                    throw new ErlDecodeException($"an export claims an arity of {arity.Value}");
+                return new ErlExport(mod, fun, fixedArity);
             }
 
             case TermTags.NewFun:

@@ -8,7 +8,14 @@ namespace BeamSharp.Protocol;
 /// <summary>One distribution frame: a control tuple plus an optional payload term.</summary>
 public readonly record struct DistMessage(ErlTerm Control, ErlTerm? Payload)
 {
-    public DistOp Op => (DistOp)((ErlInt)((ErlTuple)Control)[0]).AsInt;
+    /// <summary>
+    /// The control tuple's operation, or null when the control term is not a well-formed one. Every
+    /// part of this is peer-supplied, so none of it can be cast without checking first.
+    /// </summary>
+    public DistOp? Op => Control is ErlTuple { Arity: >= 1 } control && control[0] is ErlInt op &&
+                         op.AsIntOrNull is { } code
+        ? (DistOp)code
+        : null;
 }
 
 /// <summary>
