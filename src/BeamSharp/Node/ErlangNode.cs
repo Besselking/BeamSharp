@@ -1,7 +1,9 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using BeamSharp.Epmd;
 using BeamSharp.Networking;
 using BeamSharp.Protocol;
@@ -659,7 +661,8 @@ public sealed class ErlangNode : IAsyncDisposable
                 break;
 
             case DistOp.AliasSend or DistOp.AliasSendTt:
-                if (control[2] is ErlRef alias) HandleAliasSend(alias, message.Payload, control[1] as ErlPid);
+                if (control[2] is ErlRef alias)
+                    HandleAliasSend(connection, alias, message.Payload, control[1] as ErlPid);
                 break;
 
             case DistOp.MonitorP:
@@ -667,17 +670,18 @@ public sealed class ErlangNode : IAsyncDisposable
                 break;
 
             case DistOp.DemonitorP:
-                if (control[3] is ErlRef demonitorRef) RemoveIncomingMonitor(demonitorRef);
+                if (control[3] is ErlRef demonitorRef) RemoveIncomingMonitor(connection, demonitorRef);
                 break;
 
             case DistOp.MonitorPExit:
                 if (control[3] is ErlRef downRef)
-                    HandleDown(downRef, control[1], control.Arity > 4 ? control[4] : ErlAtom.NoProc);
+                    HandleDown(connection, downRef, control[1],
+                        control.Arity > 4 ? control[4] : ErlAtom.NoProc);
                 break;
 
             case DistOp.PayloadMonitorPExit:
                 if (control[3] is ErlRef downRef2)
-                    HandleDown(downRef2, control[1], message.Payload ?? ErlAtom.NoProc);
+                    HandleDown(connection, downRef2, control[1], message.Payload ?? ErlAtom.NoProc);
                 break;
 
             case DistOp.Link:
@@ -752,12 +756,15 @@ public sealed class ErlangNode : IAsyncDisposable
         _ => 1
     };
 
-    private void HandleAliasSend(ErlRef alias, ErlTerm? payload, ErlPid? sender)
+    private void HandleAliasSend(DistConnection connection, ErlRef alias, ErlTerm? payload, ErlPid? sender)
     {
         if (payload is null) return;
 
-        // A reply to one of our own gen_server calls: {[alias|Ref], Reply}.
+        // A reply to one of our own gen_server calls: {[alias|Ref], Reply}. PendingCall has recorded
+        // which node the call went to since it was written -- FailPendingCallsFor uses it -- and
+        // matching on the reference alone let any connected peer answer a call made to another one.
         if (_pendingCalls.TryGetValue(alias, out var pending) &&
+            pending.Node == connection.PeerNode &&
             payload is ErlTuple { Arity: 2 } replyTuple)
         {
             _pendingCalls.TryRemove(alias, out _);
@@ -768,10 +775,14 @@ public sealed class ErlangNode : IAsyncDisposable
         if (_aliases.TryGetValue(alias, out var mailbox)) mailbox.TryDeliver(payload, sender);
     }
 
-    private void HandleDown(ErlRef reference, ErlTerm monitored, ErlTerm reason)
+    private void HandleDown(DistConnection connection, ErlRef reference, ErlTerm monitored, ErlTerm reason)
     {
-        if (_pendingCalls.TryRemove(reference, out var pending))
+        // Same as the alias reply above: without the peer check a forged DOWN from any connected
+        // node fails another node's in-flight call.
+        if (_pendingCalls.TryGetValue(reference, out var pending) &&
+            pending.Node == connection.PeerNode)
         {
+            _pendingCalls.TryRemove(reference, out _);
             pending.Completion.TrySetException(new ErlangExitException(reason));
             return;
         }
@@ -808,11 +819,18 @@ public sealed class ErlangNode : IAsyncDisposable
         target.IncomingMonitors[reference] = watcher;
     }
 
-    private void RemoveIncomingMonitor(ErlRef reference)
+    private void RemoveIncomingMonitor(DistConnection connection, ErlRef reference)
     {
+        // The watcher of an incoming monitor lives on the peer that set it, so requiring the two to
+        // agree is what stops one peer dropping another's monitor by quoting its reference.
         foreach (var mailbox in _mailboxes.Values)
-            if (mailbox.IncomingMonitors.TryRemove(reference, out _))
-                return;
+        {
+            if (!mailbox.IncomingMonitors.TryGetValue(reference, out var watcher)) continue;
+            if (watcher.Node != connection.PeerNode) return;
+
+            mailbox.IncomingMonitors.TryRemove(new KeyValuePair<ErlRef, ErlPid>(reference, watcher));
+            return;
+        }
     }
 
     private void HandleLink(ErlTuple control)
@@ -950,11 +968,26 @@ public sealed class ErlangNode : IAsyncDisposable
     }
 
     /// <summary>Allocates a fresh reference on this node.</summary>
+    /// <remarks>
+    /// A reference is what tells one peer's reply from another's, so it is guessable at your peril:
+    /// two of the three words used to be a counter and the third came from Random.Shared, which
+    /// meant a peer that had seen one reference knew where the next ones would be. Two words now
+    /// come from the same CSPRNG the handshake challenge uses, and the counter keeps the third so
+    /// uniqueness does not rest on chance alone. The low word is masked to 18 bits because that is
+    /// what the emulator does when it makes one.
+    /// </remarks>
     public ErlRef NextRef()
     {
-        var n = (ulong)Interlocked.Increment(ref _refCounter);
+        Span<byte> random = stackalloc byte[8];
+        RandomNumberGenerator.Fill(random);
+
+        var counter = (uint)Interlocked.Increment(ref _refCounter);
         return new ErlRef(Name.Full, Creation,
-            [(uint)(n & 0xFFFFFFFF), (uint)(n >> 32), (uint)Random.Shared.Next()]);
+        [
+            BinaryPrimitives.ReadUInt32LittleEndian(random) & 0x3FFFF,
+            BinaryPrimitives.ReadUInt32LittleEndian(random[4..]),
+            counter
+        ]);
     }
 
     private static string? ReadCookieFile(out string path, out string? permissionWarning)
