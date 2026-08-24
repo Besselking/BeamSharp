@@ -35,10 +35,9 @@ public sealed class OutboundBackpressureTests
     [Fact]
     public async Task A_peer_that_never_reads_our_acks_does_not_wedge_the_read_loop()
     {
-        // Deliberately not a real socket on both ends. Whether the outbound queue fills would then
+        // Deliberately not a real socket on both ends: whether the outbound queue fills would then
         // depend on how much the kernel is willing to buffer, which differs by platform and by
-        // tuning -- this failed on Linux and passed on macOS for exactly that reason. A stream whose
-        // writes never complete puts the queue in the state under test on every machine.
+        // tuning. A stream that never finishes a write reaches the state under test on any machine.
         using var choked = new ChokedStream();
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
@@ -67,8 +66,8 @@ public sealed class OutboundBackpressureTests
         var frame = UnlinkFrame();
         for (var i = 0; i < 6000; i++) choked.Deliver(frame);
 
-        // Before the fix the read loop parked inside EnqueueAsync at frame 4,097 and stayed there:
-        // no close, no log, no tick, and the watchdog blocked in the same place.
+        // A read loop that waits for room here stops at the queue's capacity and never resumes: no
+        // close, no log, no tick, since the watchdog waits in the same place.
         var closed = SpinWait.SpinUntil(() => connection.IsClosed, TimeSpan.FromSeconds(15));
         Assert.True(closed,
             $"the read loop stopped after {Volatile.Read(ref handled):N0} signals and the connection stayed open");
@@ -143,8 +142,8 @@ public sealed class OutboundBackpressureTests
 
         protected override void Dispose(bool disposing)
         {
-            // DistConnection.DisposeAsync now disposes its stream, and the test holds one too, so
-            // this is called twice on purpose.
+            // DistConnection disposes the stream it was given and the test holds one too, so this
+            // is called twice.
             if (disposing && Interlocked.Exchange(ref _disposeCount, 1) == 0)
             {
                 _disposed.Cancel();

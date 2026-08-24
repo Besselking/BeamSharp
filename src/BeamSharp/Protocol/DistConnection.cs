@@ -96,9 +96,9 @@ public sealed class DistConnection : IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// These are answered from the read loop, so waiting here stops us reading, and a peer that has
-    /// stopped reading stops us for good. A full queue means this peer has ignored 4,096 frames'
-    /// worth of what we sent it; there is nothing left to say to it, so the connection goes rather
-    /// than the read loop stopping. Returns false if the frame was dropped for that reason.
+    /// stopped reading would then stop us for good. A full queue means this peer has ignored a
+    /// whole queue's worth of what we sent it; there is nothing left to say to it, so the
+    /// connection goes rather than the read loop. Returns false if the frame was dropped for that.
     /// </remarks>
     public bool TrySendSignal(ErlTerm control, ErlTerm? payload = null)
     {
@@ -235,10 +235,10 @@ public sealed class DistConnection : IAsyncDisposable
                     return;
                 }
 
-                // Not EnqueueAsync: blocking here would stop the watchdog above from ever running
-                // again, so a connection wedged on a full queue would sit undetected for as long as
-                // the peer cared to leave it. A tick that cannot be queued is not worth waiting for
-                // anyway -- there are already 4,096 frames ahead of it the peer has not read.
+                // Not EnqueueAsync: waiting for room here would stop the watchdog above from
+                // running again, leaving a wedged connection undetected for as long as the peer
+                // cared to leave it. A tick that cannot be queued is not worth waiting for anyway,
+                // with a full queue of unread frames already ahead of it.
                 if (now - Volatile.Read(ref _lastSentTicks) >= interval.TotalMilliseconds)
                     _outbound.Writer.TryWrite(new byte[4]);
             }

@@ -129,11 +129,10 @@ public sealed class ErlangNode : IAsyncDisposable
             catch (ObjectDisposedException) { return; }
             catch (Exception ex)
             {
-                // Returning here is what a stopped node does, and an accept error is not that. The
-                // node stays registered with EPMD either way, so giving up means advertising a port
-                // nothing answers on while ConnectedNodes still lists the peers from before -- the
+                // Only a stopped node stops accepting. The registration with EPMD outlives any one
+                // accept error, so abandoning the loop advertises a port nothing answers on: the
                 // node looks alive and every ping times out. Errors like running out of descriptors
-                // pass; back off so a permanent one cannot spin.
+                // pass, and the backoff keeps a permanent one from spinning.
                 Log($"accept failed: {ex.Message}");
                 try
                 {
@@ -294,11 +293,10 @@ public sealed class ErlangNode : IAsyncDisposable
             NodeDown?.Invoke(c.PeerNode, error);
         };
 
-        // Checking and then assigning let two inbound handshakes from one peer both pass the check,
-        // the second overwriting the first -- whose read, write and tick loops then run forever
-        // against a socket nobody holds. The Closed callback above already uses the KeyValuePair
-        // overload for the same reason: on a dictionary two handshakes can reach at once, only the
-        // atomic operations say anything true.
+        // Inbound handshakes complete on unsynchronised tasks, so two from one peer can reach here
+        // at once and only the atomic operations say anything true about which won. A connection
+        // dropped from the dictionary without being disposed keeps its read, write and tick loops
+        // running against a socket nobody holds.
         while (!_connections.TryAdd(connection.PeerNode, connection))
         {
             if (_connections.TryGetValue(connection.PeerNode, out var existing) && !existing.IsClosed)
@@ -308,8 +306,8 @@ public sealed class ErlangNode : IAsyncDisposable
                 return;
             }
 
-            // The entry is there but dead, and its own Closed callback may not have run yet. Evict
-            // exactly that one, so a live replacement racing us here is never the casualty.
+            // Dead, but its Closed callback may not have run yet. Evict exactly this one, so a live
+            // replacement racing us here is never the casualty.
             if (existing is not null)
                 _connections.TryRemove(new KeyValuePair<string, DistConnection>(connection.PeerNode, existing));
         }
@@ -783,7 +781,6 @@ public sealed class ErlangNode : IAsyncDisposable
     {
         if (toTerm is not ErlPid toPid || !_mailboxes.TryGetValue(toPid, out var mailbox)) return;
 
-        // A sentinel pid was allocated here for a removal that can never match one.
         if (fromTerm is ErlPid fromPid) mailbox.Links.TryRemove(fromPid, out _);
 
         if (mailbox.TrapExit)
