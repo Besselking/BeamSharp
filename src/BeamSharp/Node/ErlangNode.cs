@@ -98,6 +98,17 @@ public sealed class ErlangNode : IAsyncDisposable
     public bool UsesTls => _options.Tls is not null;
 
     /// <summary>
+    /// The flags this node offers a peer. <c>Published</c> is what makes a node visible, so it
+    /// follows <see cref="ErlangNodeOptions.Visibility"/> rather than being another capability
+    /// <see cref="ErlangNodeOptions.Flags"/> can carry: those two settings describe the same
+    /// property of the node, and only one of them is what the peer reads it from.
+    /// </summary>
+    private DistributionFlags HandshakeFlags =>
+        _options.Visibility == NodeVisibility.Visible
+            ? _options.Flags | DistributionFlags.Published
+            : _options.Flags & ~DistributionFlags.Published;
+
+    /// <summary>
     /// TLS carries the handshake in 4-byte frames throughout, where plain TCP uses 2-byte frames
     /// until the handshake finishes. Mismatching this hangs the connection instead of failing it.
     /// </summary>
@@ -196,7 +207,7 @@ public sealed class ErlangNode : IAsyncDisposable
 
                     var stream = await WrapForServerAsync(client, attempt.Token).ConfigureAwait(false);
                     var handshake = await Handshake
-                        .AcceptAsync(stream, Name.Full, Creation, _options.Flags, _ => Cookie,
+                        .AcceptAsync(stream, Name.Full, Creation, HandshakeFlags, _ => Cookie,
                             HandshakePrefix, attempt.Token)
                         .ConfigureAwait(false);
                     await AttachConnectionAsync(new DistConnection(client, stream, handshake, _options.TickTime))
@@ -254,7 +265,7 @@ public sealed class ErlangNode : IAsyncDisposable
 
             var stream = await WrapForClientAsync(client, peer.Host, attempt.Token).ConfigureAwait(false);
             var handshake = await Handshake
-                .ConnectAsync(stream, Name.Full, Creation, _options.Flags, peerNode, Cookie,
+                .ConnectAsync(stream, Name.Full, Creation, HandshakeFlags, peerNode, Cookie,
                     HandshakePrefix, attempt.Token)
                 .ConfigureAwait(false);
             await AttachConnectionAsync(new DistConnection(client, stream, handshake, _options.TickTime))
