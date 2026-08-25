@@ -29,7 +29,6 @@ public sealed class ErlangNode : IAsyncDisposable
     private readonly ConcurrentDictionary<string, Mailbox> _registered = new();
     private readonly ConcurrentDictionary<ErlPid, Mailbox> _mailboxes = new();
     private readonly ConcurrentDictionary<ErlRef, PendingCall> _pendingCalls = new();
-    private readonly ConcurrentDictionary<string, Exception> _lastConnectFailures = new();
     private readonly ConcurrentDictionary<ErlRef, Mailbox> _aliases = new();
     /// <summary>
     /// One dialling permit per peer, so a peer that cannot be reached delays only the callers
@@ -39,11 +38,11 @@ public sealed class ErlangNode : IAsyncDisposable
     /// A dial holds its permit across an EPMD lookup, a TCP connect, a TLS handshake and the
     /// distribution handshake, which together can take the EPMD timeout plus the handshake timeout.
     /// One permit for the whole node would make every one of those wait behind an unreachable peer.
-    /// Entries are per distinct name dialled and are not removed: releasing one that another caller
-    /// is about to take would let two dials at the same peer run at once, which is the race the
-    /// permit exists to stop.
+    /// Entries live only while someone is dialling that peer: <see cref="ConnectAsync"/> takes any
+    /// name a peer chose to put in a pid, so one entry per name ever seen is something a peer can
+    /// grow without bound.
     /// </remarks>
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _connectLocks = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, ConnectPermit> _connectPermits = new(StringComparer.Ordinal);
     private readonly string _cookieSource;
     private readonly string? _cookieWarning;
     private int _handshakesInFlight;
@@ -223,15 +222,27 @@ public sealed class ErlangNode : IAsyncDisposable
     // ------------------------------------------------------------ connections
 
     /// <summary>Connects to a peer node, or returns the existing connection.</summary>
-    public async Task<bool> ConnectAsync(string peerNode, CancellationToken ct = default)
-    {
-        if (_connections.ContainsKey(peerNode)) return true;
+    public async Task<bool> ConnectAsync(string peerNode, CancellationToken ct = default) =>
+        await DialAsync(peerNode, ct).ConfigureAwait(false) is null;
 
-        var connectLock = _connectLocks.GetOrAdd(peerNode, static _ => new SemaphoreSlim(1, 1));
-        await connectLock.WaitAsync(ct).ConfigureAwait(false);
+    /// <summary>
+    /// Dials <paramref name="peerNode"/> and returns why it failed, or null once there is a
+    /// connection.
+    /// </summary>
+    /// <remarks>
+    /// The reason is handed back rather than kept against the peer name. Only the caller that
+    /// dialled has any use for it, and remembering one exception -- with its stack trace -- per
+    /// name ever dialled is retention a peer can drive: it chooses the node name in the caller pid
+    /// of a <c>$gen_call</c>, and replying to that pid dials whatever it says.
+    /// </remarks>
+    private async Task<Exception?> DialAsync(string peerNode, CancellationToken ct)
+    {
+        if (_connections.ContainsKey(peerNode)) return null;
+
+        var permit = await TakeConnectPermitAsync(peerNode, ct).ConfigureAwait(false);
         try
         {
-            if (_connections.ContainsKey(peerNode)) return true;
+            if (_connections.ContainsKey(peerNode)) return null;
 
             var peer = NodeName.Parse(peerNode);
             var epmd = new EpmdClient(peer.Host, _options.EpmdPort);
@@ -242,9 +253,8 @@ public sealed class ErlangNode : IAsyncDisposable
                 // exception to carry, so it gets one made for it.
                 var unknown = new IOException(
                     $"EPMD on {peer.Host} does not know a node called '{peer.Alive}'");
-                RecordConnectFailure(peerNode, unknown);
                 Log(unknown.Message);
-                return false;
+                return unknown;
             }
 
             var client = await HostResolver.ConnectAsync(peer.Host, info.Port, ct).ConfigureAwait(false);
@@ -259,27 +269,87 @@ public sealed class ErlangNode : IAsyncDisposable
                 .ConfigureAwait(false);
             await AttachConnectionAsync(new DistConnection(client, stream, handshake, _options.TickTime))
                 .ConfigureAwait(false);
-            _lastConnectFailures.TryRemove(peerNode, out _);
-            return true;
+            return null;
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             var timeout = new TimeoutException(
                 $"connecting to {peerNode} timed out after {_options.HandshakeTimeout.TotalSeconds:0}s");
-            RecordConnectFailure(peerNode, timeout);
             Log(timeout.Message);
-            return false;
+            return timeout;
         }
         catch (Exception ex)
         {
-            RecordConnectFailure(peerNode, ex);
             Log($"connecting to {peerNode} failed: {ex.Message}");
-            return false;
+            return ex;
         }
         finally
         {
-            connectLock.Release();
+            ReturnConnectPermit(peerNode, permit);
         }
+    }
+
+    /// <summary>
+    /// Takes the dialling permit for <paramref name="peerNode"/>, creating one if this is the only
+    /// caller interested in that peer.
+    /// </summary>
+    private async Task<ConnectPermit> TakeConnectPermitAsync(string peerNode, CancellationToken ct)
+    {
+        while (true)
+        {
+            var permit = _connectPermits.GetOrAdd(peerNode, static _ => new ConnectPermit());
+            lock (permit)
+            {
+                // Retired under the same lock that removes it, so a permit fetched a moment before
+                // it left the dictionary is recognised as stale rather than used alongside its
+                // replacement.
+                if (permit.Retired) continue;
+                permit.Holders++;
+            }
+
+            try
+            {
+                await permit.Gate.WaitAsync(ct).ConfigureAwait(false);
+                return permit;
+            }
+            catch
+            {
+                ReturnConnectPermit(peerNode, permit, entered: false);
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gives the permit back, and drops it from the dictionary once nobody else wants it. Pass
+    /// <c>entered: false</c> when the caller never got through the gate, so has none to release.
+    /// </summary>
+    private void ReturnConnectPermit(string peerNode, ConnectPermit permit, bool entered = true)
+    {
+        if (entered) permit.Gate.Release();
+
+        lock (permit)
+        {
+            if (--permit.Holders > 0) return;
+            permit.Retired = true;
+            _connectPermits.TryRemove(new KeyValuePair<string, ConnectPermit>(peerNode, permit));
+        }
+
+        permit.Dispose();
+    }
+
+    /// <summary>
+    /// A peer's dialling permit, counting the callers holding or waiting for it so it can be
+    /// dropped once there are none. <see cref="Holders"/> and <see cref="Retired"/> are guarded by
+    /// locking the permit itself.
+    /// </summary>
+    private sealed class ConnectPermit : IDisposable
+    {
+        public readonly SemaphoreSlim Gate = new(1, 1);
+        public int Holders;
+        public bool Retired;
+
+        public void Dispose() => Gate.Dispose();
     }
 
     /// <summary>
@@ -362,23 +432,17 @@ public sealed class ErlangNode : IAsyncDisposable
     private async Task<DistConnection> RequireConnectionAsync(string node, CancellationToken ct)
     {
         if (_connections.TryGetValue(node, out var existing) && !existing.IsClosed) return existing;
-        if (await ConnectAsync(node, ct).ConfigureAwait(false) &&
-            _connections.TryGetValue(node, out var fresh)) return fresh;
+
+        var failure = await DialAsync(node, ct).ConfigureAwait(false);
+        if (failure is null && _connections.TryGetValue(node, out var fresh)) return fresh;
 
         // ConnectAsync reports a bad cookie, an unknown node, a TLS mismatch, a DNS failure and a
         // refused connection all as false, and the reason reaches only the log callback, which
         // defaults to discarding. The two commonest first-run problems here are a cookie mismatch
         // and the TLS/plaintext framing mismatch the README warns about, so the explanation is
         // worth carrying to whoever gets the throw.
-        throw new IOException($"no connection to {node}", _lastConnectFailures.GetValueOrDefault(node));
+        throw new IOException($"no connection to {node}", failure);
     }
-
-    /// <summary>
-    /// Remembers why the last attempt at <paramref name="node"/> failed, so the throw that follows
-    /// can carry it. Only ever one exception per peer, replaced each time.
-    /// </summary>
-    private void RecordConnectFailure(string node, Exception error) =>
-        _lastConnectFailures[node] = error;
 
     // --------------------------------------------------------------- mailboxes
 
@@ -1041,8 +1105,8 @@ public sealed class ErlangNode : IAsyncDisposable
         _connections.Clear();
 
         await _epmd.DisposeAsync().ConfigureAwait(false);
-        foreach (var connectLock in _connectLocks.Values) connectLock.Dispose();
-        _connectLocks.Clear();
+        foreach (var permit in _connectPermits.Values) permit.Dispose();
+        _connectPermits.Clear();
         _cts.Dispose();
     }
 }
