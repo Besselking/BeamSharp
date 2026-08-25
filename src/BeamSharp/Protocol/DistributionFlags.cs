@@ -9,6 +9,10 @@ public enum DistributionFlags : ulong
 {
     None = 0,
 
+    /// <summary>
+    /// Sent by a visible node and left out by a hidden one. A peer that sees it expects the node to
+    /// join the mesh and to take part in the <c>global</c> lock and sync protocol.
+    /// </summary>
     Published = 0x01,
     AtomCache = 0x02,
     ExtendedReferences = 0x04,
@@ -51,11 +55,11 @@ public enum DistributionFlags : ulong
     /// <summary>
     /// What this library advertises. Deliberately excludes the atom cache and fragmentation:
     /// both are pure optimisations, and leaving them out keeps every frame a self-contained
-    /// pass-through message.
+    /// pass-through message. <see cref="Published"/> is absent because it is not a capability
+    /// but a statement about the node, so <c>ErlangNodeOptions.Visibility</c> is what sets it.
     /// </summary>
     Default =
         Mandatory |
-        Published |
         DistMonitor |
         DistMonitorName |
         SmallAtomTags |
