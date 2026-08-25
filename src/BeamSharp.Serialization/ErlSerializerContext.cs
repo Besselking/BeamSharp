@@ -32,6 +32,8 @@ public sealed class ErlSerializableAttribute(Type type) : Attribute
 /// </summary>
 public abstract class ErlSerializerContext
 {
+    private readonly Lazy<ErlSerializerOptions> _options;
+
     /// <summary>Builds a context, optionally starting from an existing configuration.</summary>
     /// <param name="options">
     /// Naming policy, key kind and the rest. Copied, then locked. Reflection is switched off
@@ -39,14 +41,23 @@ public abstract class ErlSerializerContext
     /// </param>
     protected ErlSerializerContext(ErlSerializerOptions? options = null)
     {
-        Options = options is null ? new ErlSerializerOptions() : new ErlSerializerOptions(options);
-        // First, so generated converters win over a reflection fallback if the caller added one.
-        Options.ConverterFactories.Insert(0, CreateFactory());
-        Options.MakeReadOnly();
+        // Not built here: CreateFactory is the derived half's, and a constructor cannot ask a
+        // subclass for anything before that subclass has run. The generated factories carry no
+        // state, so nothing has noticed; a factory that reads a field its own constructor sets
+        // would see the default instead. Lazy rather than a plain null check because Options is
+        // reachable from any thread once the context is.
+        _options = new Lazy<ErlSerializerOptions>(() =>
+        {
+            var built = options is null ? new ErlSerializerOptions() : new ErlSerializerOptions(options);
+            // First, so generated converters win over a reflection fallback if the caller added one.
+            built.ConverterFactories.Insert(0, CreateFactory());
+            built.MakeReadOnly();
+            return built;
+        });
     }
 
     /// <summary>The options to serialize with. Frozen.</summary>
-    public ErlSerializerOptions Options { get; }
+    public ErlSerializerOptions Options => _options.Value;
 
     /// <summary>Supplied by the generated half of the class.</summary>
     protected abstract ErlConverterFactory CreateFactory();
