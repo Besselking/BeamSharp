@@ -75,6 +75,47 @@ public sealed class ConnectStateTests
     }
 
     /// <summary>
+    /// Disposing the node while a dial is still running used to take the dial's permit out from
+    /// under it: the dial reached its finally, released a semaphore that had just been disposed,
+    /// and the ObjectDisposedException escaped ConnectAsync -- which reports every other failure,
+    /// down to a bad cookie, by returning false.
+    /// </summary>
+    [RequiresEpmdFact]
+    public async Task Disposing_the_node_mid_dial_does_not_throw_out_of_ConnectAsync()
+    {
+        var escaped = new List<string>();
+
+        // The window is small, so this walks the delay across it rather than trying to hit it once.
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            var node = new ErlangNode($"bs_dialdispose{attempt}@{NodeName.LocalShortHost}",
+                new ErlangNodeOptions { Cookie = "dial-state-cookie" });
+            await node.StartAsync();
+
+            var dial = Task.Run(async () =>
+            {
+                try
+                {
+                    await node.ConnectAsync($"bs_dialdispose_absent{attempt}@{NodeName.LocalShortHost}");
+                    return null as string;
+                }
+                catch (Exception ex)
+                {
+                    return ex.GetType().Name;
+                }
+            });
+
+            await Task.Delay(attempt % 8);
+            await node.DisposeAsync();
+
+            if (await dial is { } thrown) escaped.Add(thrown);
+        }
+
+        Assert.True(escaped.Count == 0,
+            $"ConnectAsync threw on {escaped.Count} of 40 races: {string.Join(", ", escaped.Distinct())}");
+    }
+
+    /// <summary>
     /// Counts everything the node holds keyed by peer name, whatever it is called. Reading the
     /// fields directly is the only way to see retention that has no other effect until it has gone
     /// on long enough to matter.
