@@ -1116,7 +1116,14 @@ public sealed class ErlangNode : IAsyncDisposable
         _connections.Clear();
 
         await _epmd.DisposeAsync().ConfigureAwait(false);
-        foreach (var permit in _connectPermits.Values) permit.Dispose();
+
+        // The permits are not ours to dispose. A permit is only in the dictionary while a dial
+        // holds it, and its last holder disposes it on the way out, so disposing one here takes it
+        // out from under a dial still in flight: that dial reaches its finally, releases a disposed
+        // semaphore, and the ObjectDisposedException -- thrown from a finally, so it replaces
+        // whatever was propagating -- escapes ConnectAsync, which reports every other failure by
+        // returning false. Dropping the references is all there is to do; the dials still running
+        // clean up after themselves.
         _connectPermits.Clear();
         _cts.Dispose();
     }
