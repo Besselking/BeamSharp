@@ -177,9 +177,18 @@ suite asserts this against a live Elixir node rather than against our own reader
 | `(int, string)` | `{1, "two"}` |
 | `DateTime`, `Guid` | ISO 8601 / UUID binary |
 | `TimeSpan` | integer microseconds |
+| `ErlTerm` member | the term itself, untouched |
 
 Naming, key kind, null representation and the rest are configurable through `ErlSerializerOptions`.
 `[ErlProperty]`, `[ErlIgnore]`, `[ErlConvert]` and `[ErlAsAtom]` cover the per-member cases.
+
+Two shapes have no term to become, and both say so rather than guessing. An **object graph that
+refers back to itself** is refused — a term is a tree, so a cycle cannot be written at all — naming
+the type that closes the loop; put `[ErlIgnore]` on the back-reference, or break it before
+serializing. A member typed **`object`** is written using its runtime type, which is what makes a
+`Dictionary<string, object>` of mixed values work, but cannot be read back, because nothing in a
+term says which type to build. Use `ErlTerm` for a payload whose shape you do not know up front:
+`Dictionary<string, ErlTerm>` round-trips where `Dictionary<string, object>` cannot.
 
 ### Extending it
 

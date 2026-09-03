@@ -68,6 +68,22 @@ internal static class BuiltInConverters
             (t, _) => Guid.Parse(TermRead.Text(t)));
         Add<Uri>((v, _) => new ErlBinary(v.ToString()), (t, _) => new Uri(TermRead.Text(t)));
 
+        // object is asymmetric, and deliberately so. Writing one can use the runtime type, which is
+        // what lets a Dictionary<string, object> of mixed values work. Reading has nothing to go on:
+        // a term carries no type name, so there is no shape to build. Handling that here rather than
+        // letting the reflection fallback claim it is what makes it say so -- ObjectConverter<object>
+        // finds no members on object, and so writes an empty map and reads back a bare instance,
+        // losing the payload in both directions without a word.
+        Add<object>(
+            (v, o) => v.GetType() == typeof(object)
+                ? throw new ErlSerializationException(
+                    "cannot serialize a bare object instance: it carries nothing to write")
+                : ValueHelper.Write(v, v.GetType(), o),
+            (t, _) => throw new ErlSerializationException(
+                $"cannot read {t} into object, because nothing in a term says which type to build. " +
+                $"Deserialize into the concrete type instead, or use ErlTerm to hold the term as it " +
+                $"arrived (Dictionary<string, ErlTerm> rather than Dictionary<string, object>)."));
+
         // Terms pass through untouched. The set of them is closed, so listing the instantiations
         // here keeps this reachable without any generic machinery.
         void Pass<T>() where T : ErlTerm => map[typeof(T)] = new PassthroughConverter<T>();
