@@ -83,3 +83,20 @@ public class DuplicateNames
 
 /// <summary>Deliberately absent from the generated context, to prove reflection is really off.</summary>
 public record Undeclared(string Name);
+
+/// <summary>A node that can point at another, so a graph built from these can close a loop.</summary>
+public class Link
+{
+    public string Name { get; set; } = "";
+    public Link? Next { get; set; }
+}
+
+/// <summary>Closes its loop through a collection rather than a plain member.</summary>
+public class Group
+{
+    public string Name { get; set; } = "";
+    public List<Group> Members { get; init; } = [];
+}
+
+/// <summary>Holds a term as it arrived — the supported way to carry something not known up front.</summary>
+public record Envelope(string Kind, ErlTerm Payload);
