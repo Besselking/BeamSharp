@@ -60,6 +60,6 @@ public sealed class ConcurrentConnectTests
 
         Assert.All(dials, Assert.True);
         Assert.Single(node.ConnectedNodes);
-        Assert.Single(target.ConnectedNodes);
+        NodeWait.ForConnectionCount(target, 1);
     }
 }
