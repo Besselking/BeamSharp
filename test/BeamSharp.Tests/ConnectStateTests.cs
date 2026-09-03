@@ -70,7 +70,7 @@ public sealed class ConnectStateTests
 
         Assert.All(live, Assert.True);
         Assert.Single(node.ConnectedNodes);
-        Assert.Single(target.ConnectedNodes);
+        NodeWait.ForConnectionCount(target, 1);
         Assert.Equal(0, PerPeerEntries(node));
     }
 
