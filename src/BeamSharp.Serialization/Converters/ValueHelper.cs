@@ -21,15 +21,8 @@ internal static class ValueHelper
 
         var type = declaredType == typeof(object) ? value.GetType() : declaredType;
 
-        var entered = WriteGuard.Enter(value, type);
-        try
-        {
-            return options.GetConverter(type).WriteUntyped(value, options);
-        }
-        finally
-        {
-            WriteGuard.Exit(entered);
-        }
+        using var guard = WriteGuard.Enter(value, type);
+        return options.GetConverter(type).WriteUntyped(value, options);
     }
 
     /// <summary>Reads a value, mapping the null atom onto null for any type that can hold it.</summary>

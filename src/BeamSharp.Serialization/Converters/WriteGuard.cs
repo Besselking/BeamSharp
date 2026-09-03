@@ -27,16 +27,16 @@ internal static class WriteGuard
     [ThreadStatic] private static List<object>? _writing;
 
     /// <summary>
-    /// Marks <paramref name="value"/> as being written, returning whether it was tracked. Pass that
-    /// back to <see cref="Exit"/> from a <c>finally</c>, so an aborted write does not leave the
-    /// value marked for the next one on this thread.
+    /// Marks <paramref name="value"/> as being written until the returned scope is disposed.
+    /// <c>using</c> it is what keeps an aborted write from leaving the value marked for the next
+    /// one on this thread.
     /// </summary>
-    public static bool Enter(object value, Type type)
+    public static Scope Enter(object value, Type type)
     {
         // A boxed value type is a fresh reference every time it is written, so tracking one would
         // compare boxes rather than objects and never match. Strings are leaves. Neither can close
         // a cycle, and between them they are most of what a flat object writes.
-        if (type.IsValueType || value is string) return false;
+        if (type.IsValueType || value is string) return default;
 
         var writing = _writing ??= new List<object>(capacity: 16);
 
@@ -53,12 +53,26 @@ internal static class WriteGuard
                 $"further. A term that deep could not be encoded either.");
 
         writing.Add(value);
-        return true;
+        return new Scope(writing);
     }
 
-    /// <summary>Undoes an <see cref="Enter"/> that tracked its value.</summary>
-    public static void Exit(bool entered)
+    /// <summary>
+    /// Unmarks the value its <see cref="Enter"/> marked, or nothing at all when that call did not
+    /// track one.
+    /// <para>
+    /// A ref struct so that it cannot outlive the frame that entered it: the list it pops is the
+    /// entering thread's, so a scope stored in a field or carried across an await would unmark a
+    /// value on whatever thread got there first. Nothing in the write path is async, and this is
+    /// what keeps it that way by construction rather than by convention.
+    /// </para>
+    /// </summary>
+    public readonly ref struct Scope
     {
-        if (entered) _writing!.RemoveAt(_writing.Count - 1);
+        private readonly List<object>? _writing;
+
+        internal Scope(List<object> writing) => _writing = writing;
+
+        /// <summary>Pops the value this scope pushed. Disposing an untracked scope does nothing.</summary>
+        public void Dispose() => _writing?.RemoveAt(_writing.Count - 1);
     }
 }
